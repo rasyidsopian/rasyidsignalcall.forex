@@ -5,6 +5,7 @@ import CandleChart from "./CandleChart";
 import {
   clearApiKey,
   fetchAllTimeframes,
+  getCachedFrames,
   getSavedApiKey,
   refreshFromOneMinute,
   saveApiKey,
@@ -58,9 +59,12 @@ export default function Dashboard() {
     setLoading(true);
     try {
       const current = framesRef.current;
-      const nextFrames = !current || forceFull
-        ? await fetchAllTimeframes(key)
-        : await refreshFromOneMinute(key, current);
+      const cached = !current && forceFull ? getCachedFrames() : null;
+      const nextFrames = current
+        ? await refreshFromOneMinute(key, current)
+        : cached
+          ? await refreshFromOneMinute(key, cached)
+          : await fetchAllTimeframes(key);
 
       framesRef.current = nextFrames;
       setFrames(nextFrames);
@@ -149,7 +153,7 @@ export default function Dashboard() {
       {apiKey && (
         <div className="toolbar">
           <span>{lastUpdated ? `Last update ${new Date(lastUpdated).toLocaleTimeString()}` : "Loading multi-timeframe data..."}</span>
-          <span className="usage-note">Initial load 5 API calls; refresh berikutnya 1 call/menit.</span>
+          <span className="usage-note">Cold start maks. 5 calls; reload pakai cache + 1 call/menit.</span>
           <div>
             <button onClick={() => void refresh()} disabled={loading}>{loading ? "REFRESHING..." : "REFRESH NOW"}</button>
             <button onClick={disconnectKey}>CHANGE API KEY</button>

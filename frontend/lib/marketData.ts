@@ -2,6 +2,9 @@ import type { Candle } from "../types";
 
 const BASE = "https://api.twelvedata.com/time_series";
 const KEY_NAME = "twelve_data_api_key";
+const FRAME_CACHE = "xau_scalp_frames_v21";
+const FRAME_CACHE_AT = "xau_scalp_frames_v21_at";
+const CACHE_MAX_AGE_MS = 15 * 60_000;
 
 export type MarketFrames = {
   c1: Candle[];
@@ -24,6 +27,54 @@ export function clearApiKey() {
   window.localStorage.removeItem(KEY_NAME);
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function cacheFrames(frames: MarketFrames) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(FRAME_CACHE, JSON.stringify(frames));
+    window.localStorage.setItem(FRAME_CACHE_AT, String(Date.now()));
+  } catch {
+    // localStorage can be unavailable/full; market data still works without cache.
+  }
+}
+
+export function getCachedFrames(maxAgeMs = CACHE_MAX_AGE_MS): MarketFrames | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const at = Number(window.localStorage.getItem(FRAME_CACHE_AT) ?? "0");
+    if (!at || Date.now() - at > maxAgeMs) return null;
+    const parsed = JSON.parse(window.localStorage.getItem(FRAME_CACHE) ?? "null") as MarketFrames | null;
+    if (!parsed) return null;
+    const valid = [parsed.c1, parsed.c5, parsed.c15, parsed.c1h, parsed.c4h].every(
+      (rows) => Array.isArray(rows) && rows.length >= 205,
+    );
+    return valid ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function requestTimeSeries(url: string, maxRetries = 3): Promise<Response> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const response = await fetch(url, { cache: "no-store" });
+    if (response.status !== 429) return response;
+
+    if (attempt === maxRetries) {
+      throw new Error(
+        "Twelve Data rate limit (HTTP 429). Tunggu sampai menit berikutnya lalu REFRESH NOW. Jika tetap 429, kemungkinan kuota Basic 800/hari sudah habis.",
+      );
+    }
+
+    const retryAfter = Number(response.headers.get("retry-after") ?? "0");
+    const delayMs = retryAfter > 0 ? retryAfter * 1000 : 15_000;
+    await sleep(delayMs);
+  }
+  throw new Error("Market data request failed");
+}
+
 export async function fetchCandles(
   apiKey: string,
   interval: "1min" | "5min" | "15min" | "1h" | "4h",
@@ -37,8 +88,15 @@ export async function fetchCandles(
     format: "JSON",
     timezone: "UTC",
   });
-  const response = await fetch(`${BASE}?${params.toString()}`, { cache: "no-store" });
-  if (!response.ok) throw new Error(`Market data HTTP ${response.status}`);
+  const response = await requestTimeSeries(`${BASE}?${params.toString()}`);
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = payload?.message ? ` · ${payload.message}` : "";
+    } catch {}
+    throw new Error(`Market data HTTP ${response.status}${detail}`);
+  }
   const payload = await response.json();
   if (payload.status === "error" || !Array.isArray(payload.values)) {
     throw new Error(payload.message ?? "Twelve Data tidak mengembalikan candle XAU/USD");
@@ -56,14 +114,19 @@ export async function fetchCandles(
 }
 
 export async function fetchAllTimeframes(apiKey: string): Promise<MarketFrames> {
-  const [c1, c5, c15, c1h, c4h] = await Promise.all([
-    fetchCandles(apiKey, "1min", 1500),
-    fetchCandles(apiKey, "5min", 650),
-    fetchCandles(apiKey, "15min", 450),
-    fetchCandles(apiKey, "1h", 320),
-    fetchCandles(apiKey, "4h", 260),
-  ]);
-  return { c1, c5, c15, c1h, c4h };
+  // Cold start only. Calls are sequential instead of a 5-request burst to be kinder to Basic limits.
+  const c1 = await fetchCandles(apiKey, "1min", 1500);
+  await sleep(1200);
+  const c5 = await fetchCandles(apiKey, "5min", 650);
+  await sleep(1200);
+  const c15 = await fetchCandles(apiKey, "15min", 450);
+  await sleep(1200);
+  const c1h = await fetchCandles(apiKey, "1h", 320);
+  await sleep(1200);
+  const c4h = await fetchCandles(apiKey, "4h", 260);
+  const frames = { c1, c5, c15, c1h, c4h };
+  cacheFrames(frames);
+  return frames;
 }
 
 function bucketStart(timestamp: string, minutes: number) {
@@ -100,12 +163,14 @@ function mergeCandles(base: Candle[], recent: Candle[], keep = 700) {
 }
 
 export async function refreshFromOneMinute(apiKey: string, current: MarketFrames): Promise<MarketFrames> {
-  // One REST credit per refresh. We rebuild recent higher-TF candles locally from 1M data.
+  // One REST credit per refresh. Recent higher-TF candles are rebuilt locally from 1M data.
   const fresh1 = await fetchCandles(apiKey, "1min", 360);
   const c1 = mergeCandles(current.c1, fresh1, 1800);
   const c5 = mergeCandles(current.c5, aggregateCandles(fresh1, 5), 700);
   const c15 = mergeCandles(current.c15, aggregateCandles(fresh1, 15), 500);
   const c1h = mergeCandles(current.c1h, aggregateCandles(fresh1, 60), 350);
   const c4h = mergeCandles(current.c4h, aggregateCandles(fresh1, 240), 280);
-  return { c1, c5, c15, c1h, c4h };
+  const frames = { c1, c5, c15, c1h, c4h };
+  cacheFrames(frames);
+  return frames;
 }

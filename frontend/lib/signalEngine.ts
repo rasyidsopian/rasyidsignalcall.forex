@@ -311,7 +311,7 @@ export function generateSignal(
     reasons,
     timeframe_analysis: analyses,
     strategy_name: "xau_mtf_scalper",
-    strategy_version: "1.0.0",
+    strategy_version: "1.0.1",
   };
 }
 
