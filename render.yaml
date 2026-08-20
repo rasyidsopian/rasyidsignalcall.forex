@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: rasyidsignalcall-api
+    runtime: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: MARKET_DATA_PROVIDER
+        value: twelve_data
+      - key: TWELVE_DATA_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: rasyidsignalcall-db
+          property: connectionString
+      - key: CORS_ORIGINS
+        sync: false
+      - key: SIGNAL_MODE
+        value: HIGH_PRECISION
+      - key: MIN_SIGNAL_SCORE
+        value: "85"
+      - key: MIN_RR
+        value: "1.5"
+      - key: POLL_SECONDS
+        value: "30"
+
+databases:
+  - name: rasyidsignalcall-db
+    plan: free
