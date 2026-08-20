@@ -8,10 +8,25 @@ type Structure = {
   retest: boolean;
 };
 
+type RiskPlan = {
+  entry: number;
+  stop: number;
+  tp1: number;
+  tp2: number;
+  rr: number;
+  risk: number;
+  executionMode: "ENTER_NOW" | "WAIT_PULLBACK";
+  notes: string[];
+};
+
 const TF_MINUTES: Record<string, number> = { "1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240 };
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function round2(value: number) {
+  return Math.round(value * 100) / 100;
 }
 
 function ema(values: number[], period: number): number[] {
@@ -149,10 +164,10 @@ function classifyRegime(candles: Candle[]): string {
   const strength = adx(highs, lows, closes);
   const volatility = atr(highs, lows, closes) / closes.at(-1)!;
   const bbWidth = bollingerWidth(closes);
-  if (volatility > 0.0045) return "HIGH_VOLATILITY";
-  if (strength >= 25 && ema20 > ema50) return "TRENDING_UP";
-  if (strength >= 25 && ema20 < ema50) return "TRENDING_DOWN";
-  if (strength < 18 && bbWidth < 0.01) return "LOW_VOLATILITY";
+  if (volatility > 0.0035) return "HIGH_VOLATILITY";
+  if (strength >= 24 && ema20 > ema50) return "TRENDING_UP";
+  if (strength >= 24 && ema20 < ema50) return "TRENDING_DOWN";
+  if (strength < 18 && bbWidth < 0.006) return "LOW_VOLATILITY";
   if (strength < 22) return "RANGING";
   return "MIXED";
 }
@@ -178,24 +193,24 @@ function analyzeTimeframe(candles: Candle[], timeframe: string): TimeframeAnalys
 
   let bull = 0;
   let bear = 0;
-  if (e20 > e50 && e50 > e200) bull += 30;
-  else if (e20 < e50 && e50 < e200) bear += 30;
+  if (e20 > e50 && e50 > e200) bull += 28;
+  else if (e20 < e50 && e50 < e200) bear += 28;
   else if (e20 > e50) bull += 18;
   else if (e20 < e50) bear += 18;
 
-  if (last > e200) bull += 10;
-  else if (last < e200) bear += 10;
+  if (last > e200) bull += 8;
+  else if (last < e200) bear += 8;
 
-  if (e20 > e20Prev) bull += 10;
-  else if (e20 < e20Prev) bear += 10;
+  if (e20 > e20Prev) bull += 12;
+  else if (e20 < e20Prev) bear += 12;
 
-  if (currentRsi >= 55 && currentRsi <= 72) bull += 15;
-  else if (currentRsi > 72) bull += 8;
-  else if (currentRsi <= 45 && currentRsi >= 28) bear += 15;
-  else if (currentRsi < 28) bear += 8;
+  if (currentRsi >= 53 && currentRsi <= 70) bull += 16;
+  else if (currentRsi > 70) bull += 7;
+  else if (currentRsi <= 47 && currentRsi >= 30) bear += 16;
+  else if (currentRsi < 30) bear += 7;
 
-  if (macdLine > macdSignal && histogram > 0) bull += 15;
-  else if (macdLine < macdSignal && histogram < 0) bear += 15;
+  if (macdLine > macdSignal && histogram > 0) bull += 16;
+  else if (macdLine < macdSignal && histogram < 0) bear += 16;
 
   if (structure.direction === "BULLISH") bull += 15;
   else if (structure.direction === "BEARISH") bear += 15;
@@ -205,14 +220,13 @@ function analyzeTimeframe(candles: Candle[], timeframe: string): TimeframeAnalys
     else bear += 5;
   }
 
-  if (currentAdx >= 25) {
+  if (currentAdx >= 24) {
     if (bull > bear) bull += 5;
     else if (bear > bull) bear += 5;
   }
 
   let directionalScore = clamp(bull - bear, -100, 100);
-  // Never leave the execution stack directionless. Use price/EMA slope as a small tie-breaker.
-  if (directionalScore === 0) directionalScore = last >= e50 ? 5 : -5;
+  if (directionalScore === 0) directionalScore = last >= e50 ? 4 : -4;
   const bias: TimeframeAnalysis["bias"] = directionalScore > 0 ? "BUY" : "SELL";
   const score = clamp(Math.round(50 + Math.abs(directionalScore) * 0.5), 50, 100);
   const emaState = e20 > e50 && e50 > e200 ? "BULL_STACK" : e20 < e50 && e50 < e200 ? "BEAR_STACK" : e20 >= e50 ? "BULL_LEAN" : "BEAR_LEAN";
@@ -229,28 +243,133 @@ function analyzeTimeframe(candles: Candle[], timeframe: string): TimeframeAnalys
   };
 }
 
-function riskLevels(c1: Candle[], side: "BUY" | "SELL") {
-  const highs = c1.map((c) => c.high);
-  const lows = c1.map((c) => c.low);
-  const closes = c1.map((c) => c.close);
-  const currentAtr = atr(highs, lows, closes);
-  const entry = closes.at(-1)!;
-  const recent = c1.slice(-18);
-  const recentLow = Math.min(...recent.map((c) => c.low));
-  const recentHigh = Math.max(...recent.map((c) => c.high));
-  let risk: number;
-  if (side === "BUY") {
-    const structureRisk = Math.max(0, entry - recentLow + currentAtr * 0.12);
-    risk = clamp(Math.max(currentAtr * 1.05, structureRisk), currentAtr * 0.8, currentAtr * 2.0);
-  } else {
-    const structureRisk = Math.max(0, recentHigh - entry + currentAtr * 0.12);
-    risk = clamp(Math.max(currentAtr * 1.05, structureRisk), currentAtr * 0.8, currentAtr * 2.0);
+function confirmedPivots(candles: Candle[], side: "LOW" | "HIGH", lookback = 45): number[] {
+  const rows = candles.slice(-lookback - 4);
+  const out: number[] = [];
+  for (let i = 2; i < rows.length - 2; i++) {
+    if (side === "LOW") {
+      const v = rows[i].low;
+      if (v < rows[i - 1].low && v <= rows[i - 2].low && v < rows[i + 1].low && v <= rows[i + 2].low) out.push(v);
+    } else {
+      const v = rows[i].high;
+      if (v > rows[i - 1].high && v >= rows[i - 2].high && v > rows[i + 1].high && v >= rows[i + 2].high) out.push(v);
+    }
   }
-  const stop = side === "BUY" ? entry - risk : entry + risk;
-  const tp1 = side === "BUY" ? entry + risk : entry - risk;
-  const tp2 = side === "BUY" ? entry + risk * 1.5 : entry - risk * 1.5;
-  const round = (x: number) => Math.round(x * 100) / 100;
-  return { entry: round(entry), stop: round(stop), tp1: round(tp1), tp2: round(tp2), rr: 1.5 };
+  return out;
+}
+
+function liquiditySweep(c1: Candle[], side: "BUY" | "SELL") {
+  if (c1.length < 14) return null;
+  const recent = c1.at(-1)!;
+  const prev = c1.slice(-11, -1);
+  if (side === "BUY") {
+    const low = Math.min(...prev.map((c) => c.low));
+    return recent.low < low && recent.close > low ? recent.low : null;
+  }
+  const high = Math.max(...prev.map((c) => c.high));
+  return recent.high > high && recent.close < high ? recent.high : null;
+}
+
+function nearestFiveMinuteTarget(c5: Candle[], side: "BUY" | "SELL", entry: number): number | null {
+  const pivots = confirmedPivots(c5, side === "BUY" ? "HIGH" : "LOW", 60);
+  if (side === "BUY") {
+    const candidates = pivots.filter((x) => x > entry).sort((a, b) => a - b);
+    return candidates[0] ?? null;
+  }
+  const candidates = pivots.filter((x) => x < entry).sort((a, b) => b - a);
+  return candidates[0] ?? null;
+}
+
+function buildRiskPlan(c1: Candle[], c5: Candle[], side: "BUY" | "SELL", a1: TimeframeAnalysis, a5: TimeframeAnalysis): RiskPlan {
+  const c1Highs = c1.map((c) => c.high);
+  const c1Lows = c1.map((c) => c.low);
+  const c1Closes = c1.map((c) => c.close);
+  const c5Highs = c5.map((c) => c.high);
+  const c5Lows = c5.map((c) => c.low);
+  const c5Closes = c5.map((c) => c.close);
+  const atr1 = atr(c1Highs, c1Lows, c1Closes);
+  const atr5 = atr(c5Highs, c5Lows, c5Closes);
+  const e20 = ema(c1Closes, 20).at(-1)!;
+  const current = c1Closes.at(-1)!;
+  const pivots = confirmedPivots(c1, side === "BUY" ? "LOW" : "HIGH");
+  const sweep = liquiditySweep(c1, side);
+  const notes: string[] = [];
+
+  let executionMode: RiskPlan["executionMode"] = "ENTER_NOW";
+  const extension = Math.abs(current - e20) / Math.max(atr1, 0.01);
+  if (a1.bias !== side || a5.bias !== side || extension > 0.72) executionMode = "WAIT_PULLBACK";
+
+  const fallbackWindow = c1.slice(-22, -2);
+  const fallbackAnchor = side === "BUY"
+    ? Math.min(...fallbackWindow.map((c) => c.low))
+    : Math.max(...fallbackWindow.map((c) => c.high));
+  const pivotAnchor = pivots.at(-1) ?? fallbackAnchor;
+  let anchor = sweep == null ? pivotAnchor : (side === "BUY" ? Math.min(pivotAnchor, sweep) : Math.max(pivotAnchor, sweep));
+  const buffer = Math.max(atr1 * 0.22, atr5 * 0.055);
+
+  let entry = current;
+  let stop = side === "BUY" ? anchor - buffer : anchor + buffer;
+  let risk = Math.abs(entry - stop);
+  const minRisk = Math.max(atr1 * 0.88, atr5 * 0.15);
+  if (risk < minRisk) {
+    stop = side === "BUY" ? entry - minRisk : entry + minRisk;
+    risk = minRisk;
+    notes.push("SL diperlebar sedikit di luar noise 1M/ATR agar tidak terlalu ketat.");
+  }
+
+  const maxComfortRisk = Math.max(atr1 * 1.45, atr5 * 0.72);
+  if (risk > maxComfortRisk) {
+    executionMode = "WAIT_PULLBACK";
+    const ideal = side === "BUY" ? Math.min(current, e20 + atr1 * 0.12) : Math.max(current, e20 - atr1 * 0.12);
+    entry = ideal;
+    risk = Math.abs(entry - stop);
+    notes.push("Harga terlalu jauh dari micro value; tunggu pullback untuk mengecilkan jarak SL.");
+  }
+
+  const minimumProtectedRisk = Math.max(atr1 * 0.82, atr5 * 0.13);
+  if ((side === "BUY" && entry <= stop) || (side === "SELL" && entry >= stop)) {
+    entry = side === "BUY" ? stop + minimumProtectedRisk : stop - minimumProtectedRisk;
+    executionMode = "WAIT_PULLBACK";
+  }
+  risk = Math.abs(entry - stop);
+  if (risk < minimumProtectedRisk) {
+    stop = side === "BUY" ? entry - minimumProtectedRisk : entry + minimumProtectedRisk;
+    risk = minimumProtectedRisk;
+  }
+
+  const target1R = 1.6;
+  const target2R = 2.2;
+  let tp1 = side === "BUY" ? entry + risk * target1R : entry - risk * target1R;
+  let tp2 = side === "BUY" ? entry + risk * target2R : entry - risk * target2R;
+
+  const structuralTarget = nearestFiveMinuteTarget(c5, side, entry);
+  if (structuralTarget != null) {
+    const availableR = Math.abs(structuralTarget - entry) / Math.max(risk, 0.01);
+    if (availableR < 1.45) {
+      executionMode = "WAIT_PULLBACK";
+      notes.push("Ruang ke liquidity 5M terlalu sempit; tunggu entry lebih baik sebelum eksekusi.");
+    } else if (availableR < target2R) {
+      const cushion = Math.max(atr1 * 0.12, 0.08);
+      tp2 = side === "BUY" ? structuralTarget - cushion : structuralTarget + cushion;
+      notes.push("TP2 dipasang sebelum liquidity/swing 5M terdekat agar lebih realistis.");
+    }
+  }
+
+  const actualRr = Math.abs(tp2 - entry) / Math.max(risk, 0.01);
+  if (actualRr < 1.55) executionMode = "WAIT_PULLBACK";
+  if (sweep != null) notes.push("SL diletakkan di luar wick liquidity sweep terbaru + ATR buffer.");
+  else notes.push("SL diletakkan di luar confirmed micro swing + ATR buffer, bukan tepat di swing.");
+
+  return {
+    entry: round2(entry),
+    stop: round2(stop),
+    tp1: round2(tp1),
+    tp2: round2(tp2),
+    rr: Math.round(actualRr * 10) / 10,
+    risk: round2(risk),
+    executionMode,
+    notes,
+  };
 }
 
 export function generateSignal(
@@ -280,24 +399,40 @@ export function generateSignal(
     analyzeTimeframe(c1, "1m"),
   ];
   const [a4h, a1h, a15, a5, a1] = analyses;
-  const weights = [0.12, 0.23, 0.27, 0.23, 0.15];
+
+  // Scalping V4: 80% of directional decision comes from 1M/5M/15M. Higher TFs are context only.
+  const weights = [0.03, 0.05, 0.12, 0.38, 0.42];
   const net = analyses.reduce((sum, a, i) => sum + a.directionalScore * weights[i], 0);
   const side: "BUY" | "SELL" = net >= 0 ? "BUY" : "SELL";
-  const agreement = analyses.filter((a) => a.bias === side).length;
-  let confidence = Math.round(50 + Math.abs(net) * 0.45 + Math.max(0, agreement - 3) * 2);
-  confidence = clamp(confidence, 51, 97);
-  const regime = classifyRegime(c15);
-  const levels = riskLevels(c1, side);
-  const last1 = c1.at(-1)!;
+  const microAgreement = Number(a1.bias === side) + Number(a5.bias === side);
+  const setupAgreement = Number(a15.bias === side);
+  const contextAgreement = Number(a1h.bias === side) + Number(a4h.bias === side);
 
-  const opposite = analyses.filter((a) => a.bias !== side).map((a) => a.timeframe.toUpperCase());
+  let confidence = Math.round(
+    48 + Math.abs(net) * 0.38 + microAgreement * 7 + setupAgreement * 4 + contextAgreement * 1.5,
+  );
+  if (a1.bias !== a5.bias) confidence -= 8;
+  confidence = clamp(confidence, 51, 96);
+
+  const regime = classifyRegime(c5);
+  const levels = buildRiskPlan(c1, c5, side, a1, a5);
+  if (levels.executionMode === "ENTER_NOW") confidence = clamp(confidence + 3, 51, 96);
+  else confidence = clamp(confidence - 4, 51, 96);
+
+  const setupGrade: Signal["setup_grade"] = levels.executionMode === "ENTER_NOW" && confidence >= 80 && levels.rr >= 1.8
+    ? "A"
+    : levels.executionMode === "ENTER_NOW" && confidence >= 68
+      ? "B"
+      : "C";
+
+  const last1 = c1.at(-1)!;
   const reasons = [
-    `4H context ${a4h.bias} (${a4h.score}/100) · 1H bias ${a1h.bias} (${a1h.score}/100)`,
-    `15M setup ${a15.bias} · structure ${a15.structure.toLowerCase()} · ADX ${a15.adx}`,
-    `5M momentum ${a5.bias} · RSI ${a5.rsi} · ADX ${a5.adx}`,
-    `1M trigger ${a1.bias} · RSI ${a1.rsi} · EMA ${a1.emaState.replaceAll("_", " ").toLowerCase()}`,
-    `${agreement}/5 timeframe mendukung ${side}${opposite.length ? `; kontra: ${opposite.join(", ")}` : ""}`,
-    `Regime 15M: ${regime}`,
+    `Micro focus: 1M ${a1.bias} (${a1.score}/100) + 5M ${a5.bias} (${a5.score}/100) menyumbang 80% bobot arah.`,
+    `15M hanya setup context ${a15.bias}; 1H/4H dipakai sebagai filter, bukan penentu utama entry scalp.`,
+    `5M regime ${regime.replaceAll("_", " ")} · 5M RSI ${a5.rsi} · ADX ${a5.adx}.`,
+    `1M trigger ${a1.bias} · RSI ${a1.rsi} · EMA ${a1.emaState.replaceAll("_", " ").toLowerCase()}.`,
+    ...levels.notes,
+    `Execution ${levels.executionMode === "ENTER_NOW" ? "ENTER NOW" : "WAIT PULLBACK"} · planned TP2 R:R ${levels.rr.toFixed(1)}R.`,
   ];
 
   return {
@@ -311,11 +446,15 @@ export function generateSignal(
     risk_reward: levels.rr,
     market_regime: regime,
     timestamp: liveIntrabar ? new Date(evalMs).toISOString() : new Date(new Date(last1.timestamp).getTime() + 60_000).toISOString(),
-    status: liveIntrabar ? (confidence >= 75 ? "LIVE HIGH" : confidence >= 62 ? "LIVE VALID" : "LIVE LOW EDGE") : (confidence >= 75 ? "HIGH_CONVICTION" : confidence >= 62 ? "VALID" : "LOW_EDGE"),
+    status: levels.executionMode === "ENTER_NOW" ? `${side} NOW · GRADE ${setupGrade}` : `${side} BIAS · WAIT PULLBACK`,
+    execution_mode: levels.executionMode,
+    setup_grade: setupGrade,
+    current_price: round2(c1Raw.at(-1)?.close ?? levels.entry),
+    risk_distance: levels.risk,
     reasons,
     timeframe_analysis: analyses,
-    strategy_name: "xau_mtf_scalper",
-    strategy_version: liveIntrabar ? "2.0.0-live" : "2.0.0",
+    strategy_name: "xau_microstructure_scalper",
+    strategy_version: liveIntrabar ? "3.0.0-live" : "3.0.0",
   };
 }
 
@@ -323,12 +462,16 @@ function statsFromTrades(trades: BacktestTrade[]): BacktestStats {
   const wins = trades.filter((t) => t.result === "WIN").length;
   const losses = trades.filter((t) => t.result === "LOSS").length;
   const sampleSize = wins + losses;
+  const averageRiskReward = trades.length
+    ? Math.round((trades.reduce((s, t) => s + t.riskReward, 0) / trades.length) * 100) / 100
+    : null;
   return {
     winRate: sampleSize ? Math.round((wins / sampleSize) * 1000) / 10 : null,
     wins,
     losses,
     sampleSize,
-    profitFactor: losses ? Math.round((wins / losses) * 100) / 100 : wins ? 99 : null,
+    profitFactor: losses ? Math.round((wins * 1.6 / losses) * 100) / 100 : wins ? 99 : null,
+    averageRiskReward,
     trades,
   };
 }
@@ -339,13 +482,13 @@ export function backtestStrategy(
   c15: Candle[],
   c1h: Candle[],
   c4h: Candle[],
-  maxTrades = 120,
+  maxTrades = 160,
 ): BacktestStats {
   const trades: BacktestTrade[] = [];
-  const horizon = 20; // max holding time: 20 one-minute candles
-  const start = Math.max(230, c1.length - 1100);
+  const horizon = 15; // scalp test: max holding time 15 one-minute candles
+  const start = Math.max(230, c1.length - 1300);
 
-  for (let i = start; i < c1.length - horizon - 2; i += 5) {
+  for (let i = start; i < c1.length - horizon - 2; i += 2) {
     const evaluationMs = new Date(c1[i].timestamp).getTime() + 60_000;
     try {
       const signal = generateSignal(
@@ -356,12 +499,15 @@ export function backtestStrategy(
         c4h,
         evaluationMs,
       );
+      // Win-rate is only reported for entries the engine itself marked executable.
+      if (signal.execution_mode !== "ENTER_NOW") continue;
+
       const future = c1.slice(i + 1, i + 1 + horizon);
       let result: "WIN" | "LOSS" | null = null;
       for (const bar of future) {
         const slHit = signal.signal === "BUY" ? bar.low <= signal.stop_loss : bar.high >= signal.stop_loss;
         const tpHit = signal.signal === "BUY" ? bar.high >= signal.take_profit_1 : bar.low <= signal.take_profit_1;
-        if (slHit && tpHit) { result = "LOSS"; break; } // conservative when intrabar order is unknown
+        if (slHit && tpHit) { result = "LOSS"; break; }
         if (slHit) { result = "LOSS"; break; }
         if (tpHit) { result = "WIN"; break; }
       }
@@ -372,10 +518,11 @@ export function backtestStrategy(
           confidence: signal.confidence,
           regime: signal.market_regime,
           result,
+          riskReward: signal.risk_reward,
         });
       }
     } catch {
-      // Not enough synchronized history at this timestamp; skip without fabricating a result.
+      // Skip timestamps without enough synchronized closed history.
     }
   }
 
@@ -391,5 +538,5 @@ export function matchingSetupStats(stats: BacktestStats, signal: Signal): Backte
     matches = stats.trades.filter((t) => t.side === signal.signal && Math.abs(t.confidence - signal.confidence) <= 10);
   }
   if (matches.length < 12) matches = stats.trades.filter((t) => t.side === signal.signal);
-  return statsFromTrades(matches.slice(-60));
+  return statsFromTrades(matches.slice(-80));
 }

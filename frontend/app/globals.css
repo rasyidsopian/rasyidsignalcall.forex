@@ -86,3 +86,11 @@ th { color: var(--muted); font-size: 11px; letter-spacing: .06em; }
 .live-tag { margin-left: 10px; vertical-align: middle; color: var(--muted); font-size: 10px; letter-spacing: .09em; }
 .live-tag.on { color: var(--buy); }
 .market-price small { font-weight: 900; }
+.execution-box { margin: 0 22px 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; display: grid; gap: 4px; background: rgba(255,255,255,.02); }
+.execution-box small { color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .08em; }
+.execution-box strong { font-size: 18px; }
+.execution-box span { color: var(--muted); font-size: 11px; }
+.execution-box.ready { border-color: rgba(25,195,125,.35); background: rgba(25,195,125,.06); }
+.execution-box.ready strong { color: var(--buy); }
+.execution-box.wait { border-color: rgba(233,185,73,.35); background: rgba(233,185,73,.05); }
+.execution-box.wait strong { color: var(--gold); }

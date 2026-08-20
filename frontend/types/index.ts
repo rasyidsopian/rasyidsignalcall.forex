@@ -11,6 +11,8 @@ export type TimeframeAnalysis = {
   emaState: string;
 };
 
+export type ExecutionMode = "ENTER_NOW" | "WAIT_PULLBACK";
+
 export type Signal = {
   symbol: string;
   signal: "BUY" | "SELL";
@@ -23,6 +25,10 @@ export type Signal = {
   market_regime: string;
   timestamp: string;
   status: string;
+  execution_mode: ExecutionMode;
+  setup_grade: "A" | "B" | "C";
+  current_price: number;
+  risk_distance: number;
   reasons: string[];
   timeframe_analysis: TimeframeAnalysis[];
   strategy_name: string;
@@ -44,6 +50,7 @@ export type BacktestTrade = {
   confidence: number;
   regime: string;
   result: "WIN" | "LOSS";
+  riskReward: number;
 };
 
 export type BacktestStats = {
@@ -52,5 +59,6 @@ export type BacktestStats = {
   losses: number;
   sampleSize: number;
   profitFactor: number | null;
+  averageRiskReward: number | null;
   trades: BacktestTrade[];
 };

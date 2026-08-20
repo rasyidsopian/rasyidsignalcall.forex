@@ -30,12 +30,12 @@ function percent(value: number | null | undefined) {
 }
 
 function loadHistory(): HistoryRow[] {
-  try { return JSON.parse(localStorage.getItem("xau_scalp_signal_history_v3") ?? "[]"); }
+  try { return JSON.parse(localStorage.getItem("xau_scalp_signal_history_v4") ?? "[]"); }
   catch { return []; }
 }
 
 function saveHistory(rows: HistoryRow[]) {
-  localStorage.setItem("xau_scalp_signal_history_v3", JSON.stringify(rows.slice(0, 180)));
+  localStorage.setItem("xau_scalp_signal_history_v4", JSON.stringify(rows.slice(0, 180)));
 }
 
 export default function Dashboard() {
@@ -154,7 +154,7 @@ export default function Dashboard() {
         setError(null);
 
         const now = performance.now();
-        if (now - lastSignalCalcRef.current >= 500) {
+        if (now - lastSignalCalcRef.current >= 100) {
           lastSignalCalcRef.current = now;
           try {
             const candidate = generateSignal(
@@ -179,7 +179,7 @@ export default function Dashboard() {
               } else {
                 const updated = { ...pending, count: pending.count + 1, signal: candidate };
                 pendingFlipRef.current = updated;
-                if (updated.count >= 3 && Date.now() - updated.since >= 1000) {
+                if (updated.count >= 2 && Date.now() - updated.since >= 250) {
                   publishSignal(candidate);
                   pendingFlipRef.current = null;
                 }
@@ -257,9 +257,9 @@ export default function Dashboard() {
     <main className="shell">
       <header className="topbar">
         <div>
-          <div className="eyebrow">RASYID SIGNAL CALL · REALTIME SCALPING V3</div>
+          <div className="eyebrow">RASYID SIGNAL CALL · REALTIME SCALPING V4</div>
           <h1>XAU/USD</h1>
-          <div className="subline">4H → 1H → 15M → 5M → 1M · REST history + live WebSocket execution</div>
+          <div className="subline">4H/1H context → 15M setup → 5M + 1M micro execution · realtime WebSocket</div>
         </div>
         <div className={`status ${isLive ? "online" : "offline"}`}>
           <span /> {apiKey ? `WS ${streamState}` : "API KEY REQUIRED"}
@@ -280,7 +280,7 @@ export default function Dashboard() {
       {apiKey && (
         <div className="toolbar">
           <span>{lastTickAt ? `Last tick ${new Date(lastTickAt).toLocaleTimeString()} · ${tickAge?.toFixed(1)}s ago` : loading ? "Loading historical data..." : "Waiting for first live tick..."}</span>
-          <span className="usage-note">WebSocket drives realtime chart/call · REST only for history sync · ticks {tickCount}</span>
+          <span className="usage-note">WebSocket tick → chart immediately · signal recalc ≤100ms · REST only for history · ticks {tickCount}</span>
           <div>
             <button onClick={() => void syncHistory()} disabled={loading || !frames}>{loading ? "SYNCING..." : "SYNC HISTORY"}</button>
             <button onClick={disconnectKey}>CHANGE API KEY</button>
@@ -298,22 +298,26 @@ export default function Dashboard() {
         </article>
 
         <aside className={`panel signal-panel ${tone}`}>
-          <div className="panel-head"><span>SCALP CALL NOW</span><span>{signal?.status ?? "WAITING"}</span></div>
+          <div className="panel-head"><span>MICRO SCALP CALL</span><span>{signal?.status ?? "WAITING"}</span></div>
           <div className="signal-name">{signal?.signal ?? "—"}</div>
-          <div className="confidence"><span>{signal?.confidence ?? 0}</span><small>/100 live confluence</small></div>
+          <div className="confidence"><span>{signal?.confidence ?? 0}</span><small>/100 micro confluence</small></div>
+          <div className={`execution-box ${signal?.execution_mode === "ENTER_NOW" ? "ready" : "wait"}`}>
+            <small>EXECUTION</small><strong>{signal?.execution_mode === "ENTER_NOW" ? "ENTER NOW" : "WAIT PULLBACK"}</strong>
+            <span>Setup grade {signal?.setup_grade ?? "—"} · 5M/1M weighted 80%</span>
+          </div>
           <div className="winrate-block">
             <div><small>HISTORICAL SETUP WR</small><strong>{percent(setupStats?.winRate)}</strong></div>
             <div><small>SAMPLE</small><strong>N={setupStats?.sampleSize ?? 0}</strong></div>
             <div className="sample-badge">{sampleQuality} · CLOSED-CANDLE TEST</div>
           </div>
           <div className="levels">
-            <div><small>ENTRY NOW</small><strong>{price(signal?.entry_price)}</strong></div>
+            <div><small>SUGGESTED ENTRY</small><strong>{price(signal?.entry_price)}</strong></div>
             <div><small>STOP LOSS</small><strong>{price(signal?.stop_loss)}</strong></div>
-            <div><small>TP1 · 1R</small><strong>{price(signal?.take_profit_1)}</strong></div>
-            <div><small>TP2 · 1.5R</small><strong>{price(signal?.take_profit_2)}</strong></div>
+            <div><small>TP1 · ~1.6R</small><strong>{price(signal?.take_profit_1)}</strong></div>
+            <div><small>TP2 · structure / ~2.2R</small><strong>{price(signal?.take_profit_2)}</strong></div>
           </div>
           <div className="rr"><span>R:R</span><strong>{signal?.risk_reward ? `1:${signal.risk_reward}` : "—"}</strong></div>
-          <div className="regime"><small>15M MARKET REGIME</small><strong>{signal?.market_regime?.replaceAll("_", " ") ?? "—"}</strong></div>
+          <div className="regime"><small>5M MARKET REGIME</small><strong>{signal?.market_regime?.replaceAll("_", " ") ?? "—"}</strong><small>Risk distance {price(signal?.risk_distance)} · live {price(signal?.current_price)}</small></div>
         </aside>
       </section>
 
@@ -321,7 +325,7 @@ export default function Dashboard() {
         <article className="panel metric-card">
           <div className="panel-head"><span>RECENT STRATEGY BACKTEST</span><span>CLOSED BARS ONLY</span></div>
           <div className="metric-main">{percent(backtest?.winRate)}</div>
-          <div className="metric-caption">TP1 before SL · max hold 20M · N={backtest?.sampleSize ?? 0}</div>
+          <div className="metric-caption">Executable entries only · TP1 before SL · max hold 15M · N={backtest?.sampleSize ?? 0}</div>
           <div className="mini-metrics">
             <span>WINS <strong>{backtest?.wins ?? 0}</strong></span>
             <span>LOSSES <strong>{backtest?.losses ?? 0}</strong></span>
@@ -360,13 +364,13 @@ export default function Dashboard() {
           <div className="panel-head"><span>WHY THIS CALL?</span><span>{signal?.strategy_version ?? "v—"}</span></div>
           <ul className="reasons">{(signal?.reasons ?? ["Waiting for market data..."]).map((reason) => <li key={reason}>{reason}</li>)}</ul>
           <div className="research-note">
-            LIVE confluence memakai candle intrabar yang berubah bersama tick. Historical win rate tetap dihitung hanya dari candle yang sudah close untuk menghindari future leakage. Call yang disimpan ke history dibekukan satu kali saat candle 1M berganti.
+            V4 memprioritaskan 5M + 1M untuk entry. Higher timeframe hanya konteks. Win rate historical hanya menghitung setup yang engine tandai ENTER NOW pada closed candles. Stop ditempatkan di luar micro swing/liquidity sweep dengan ATR buffer; ini mengurangi stop yang terlalu ketat tetapi tidak menjamin terhindar dari stop-out.
           </div>
         </article>
       </section>
 
       <section className="panel history">
-        <div className="panel-head"><span>FROZEN 1M CALL HISTORY</span><span>Immutable snapshot · stored in this browser</span></div>
+        <div className="panel-head"><span>FROZEN 1M CALL HISTORY</span><span>V4 snapshots · stored in this browser</span></div>
         {history.length === 0 ? <div className="empty">Belum ada closed-minute call tersimpan.</div> : (
           <div className="table-wrap"><table><thead><tr><th>Time</th><th>Call</th><th>Confluence</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Regime</th></tr></thead><tbody>
             {history.map((row) => <tr key={row.id}>

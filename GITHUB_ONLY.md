@@ -1,7 +1,10 @@
-# Browser-only deployment
+# GitHub Pages deployment
 
-This version requires no Railway, Render, Postgres, or Python backend.
+1. Open the GitHub repository.
+2. Choose **Add file → Upload files**.
+3. Upload the CONTENTS of this folder so `frontend/` and `.github/` remain at repository root.
+4. Commit directly to `main`.
+5. GitHub Actions automatically runs `Deploy GitHub Pages`.
+6. Hard refresh the live site after the deployment turns green.
 
-Upload the contents of this folder to the repository root. Keep `.github/workflows/pages.yml` and `.github/workflows/ci.yml` in place. GitHub Actions will rebuild and deploy automatically on `main`.
-
-Realtime market data uses Twelve Data WebSocket in the browser. Historical candles use Twelve Data REST only on initialization/manual sync.
+V4 intentionally uses no Railway/Render backend. Twelve Data REST initializes historical candles and WebSocket streams live XAU/USD ticks directly to the browser.

@@ -3,8 +3,8 @@ import type { Candle } from "../types";
 const BASE = "https://api.twelvedata.com/time_series";
 const WS_BASE = "wss://ws.twelvedata.com/v1/quotes/price";
 const KEY_NAME = "twelve_data_api_key";
-const FRAME_CACHE = "xau_scalp_frames_v3";
-const FRAME_CACHE_AT = "xau_scalp_frames_v3_at";
+const FRAME_CACHE = "xau_scalp_frames_v4";
+const FRAME_CACHE_AT = "xau_scalp_frames_v4_at";
 const CACHE_MAX_AGE_MS = 4 * 60 * 60_000;
 
 export type MarketFrames = {
@@ -40,10 +40,37 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function validCandle(c: Candle) {
+  const ts = new Date(c.timestamp).getTime();
+  return Number.isFinite(ts) && ts > 0 && [c.open, c.high, c.low, c.close].every(Number.isFinite) && c.high >= c.low;
+}
+
+function sanitizeRows(rows: Candle[], keep: number) {
+  const map = new Map<number, Candle>();
+  for (const candle of rows) {
+    if (!validCandle(candle)) continue;
+    map.set(new Date(candle.timestamp).getTime(), candle);
+  }
+  return [...map.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, candle]) => candle)
+    .slice(-keep);
+}
+
+function sanitizeFrames(frames: MarketFrames): MarketFrames {
+  return {
+    c1: sanitizeRows(frames.c1, 1800),
+    c5: sanitizeRows(frames.c5, 700),
+    c15: sanitizeRows(frames.c15, 500),
+    c1h: sanitizeRows(frames.c1h, 350),
+    c4h: sanitizeRows(frames.c4h, 280),
+  };
+}
+
 function cacheFrames(frames: MarketFrames) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(FRAME_CACHE, JSON.stringify(frames));
+    window.localStorage.setItem(FRAME_CACHE, JSON.stringify(sanitizeFrames(frames)));
     window.localStorage.setItem(FRAME_CACHE_AT, String(Date.now()));
   } catch {
     // localStorage can be unavailable/full; market data still works without cache.
@@ -64,7 +91,7 @@ export function getCachedFrames(maxAgeMs = CACHE_MAX_AGE_MS): MarketFrames | nul
     const valid = [parsed.c1, parsed.c5, parsed.c15, parsed.c1h, parsed.c4h].every(
       (rows) => Array.isArray(rows) && rows.length >= 205,
     );
-    return valid ? parsed : null;
+    return valid ? sanitizeFrames(parsed) : null;
   } catch {
     return null;
   }
@@ -114,7 +141,7 @@ export async function fetchCandles(
   if (payload.status === "error" || !Array.isArray(payload.values)) {
     throw new Error(payload.message ?? "Twelve Data tidak mengembalikan candle XAU/USD");
   }
-  return payload.values
+  return sanitizeRows(payload.values
     .map((v: any) => ({
       timestamp: `${v.datetime.replace(" ", "T")}Z`,
       open: Number(v.open),
@@ -123,7 +150,7 @@ export async function fetchCandles(
       close: Number(v.close),
       volume: Number(v.volume ?? 0),
     }))
-    .reverse();
+    .reverse(), outputsize);
 }
 
 export async function fetchAllTimeframes(apiKey: string): Promise<MarketFrames> {
@@ -137,7 +164,7 @@ export async function fetchAllTimeframes(apiKey: string): Promise<MarketFrames> 
   const c1h = await fetchCandles(apiKey, "1h", 320);
   await sleep(1200);
   const c4h = await fetchCandles(apiKey, "4h", 260);
-  const frames = { c1, c5, c15, c1h, c4h };
+  const frames = sanitizeFrames({ c1, c5, c15, c1h, c4h });
   cacheFrames(frames);
   return frames;
 }
@@ -177,13 +204,17 @@ function upsertTick(rows: Candle[], price: number, timestampMs: number, minutes:
 }
 
 export function applyRealtimeTick(frames: MarketFrames, tick: RealtimeTick): MarketFrames {
-  return {
-    c1: upsertTick(frames.c1, tick.price, tick.timestampMs, 1, 1800),
-    c5: upsertTick(frames.c5, tick.price, tick.timestampMs, 5, 700),
-    c15: upsertTick(frames.c15, tick.price, tick.timestampMs, 15, 500),
-    c1h: upsertTick(frames.c1h, tick.price, tick.timestampMs, 60, 350),
-    c4h: upsertTick(frames.c4h, tick.price, tick.timestampMs, 240, 280),
-  };
+  const lastMs = frames.c1.at(-1) ? new Date(frames.c1.at(-1)!.timestamp).getTime() : 0;
+  // Ignore severely out-of-order provider events so a stale tick cannot corrupt chart chronology.
+  if (lastMs && tick.timestampMs < lastMs - 90_000) return frames;
+  const safeTimestamp = tick.timestampMs > Date.now() + 60_000 ? Date.now() : tick.timestampMs;
+  return sanitizeFrames({
+    c1: upsertTick(frames.c1, tick.price, safeTimestamp, 1, 1800),
+    c5: upsertTick(frames.c5, tick.price, safeTimestamp, 5, 700),
+    c15: upsertTick(frames.c15, tick.price, safeTimestamp, 15, 500),
+    c1h: upsertTick(frames.c1h, tick.price, safeTimestamp, 60, 350),
+    c4h: upsertTick(frames.c4h, tick.price, safeTimestamp, 240, 280),
+  });
 }
 
 function mergeCandles(base: Candle[], recent: Candle[], keep = 700) {
@@ -225,7 +256,7 @@ export async function refreshFromOneMinute(apiKey: string, current: MarketFrames
   const c15 = mergeCandles(current.c15, aggregateCandles(fresh1, 15), 500);
   const c1h = mergeCandles(current.c1h, aggregateCandles(fresh1, 60), 350);
   const c4h = mergeCandles(current.c4h, aggregateCandles(fresh1, 240), 280);
-  const frames = { c1, c5, c15, c1h, c4h };
+  const frames = sanitizeFrames({ c1, c5, c15, c1h, c4h });
   cacheFrames(frames);
   return frames;
 }
