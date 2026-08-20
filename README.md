@@ -1,33 +1,32 @@
-# Rasyid Signal Call — XAU/USD
+# Rasyid Signal Call — XAU/USD Scalping v2
 
-GitHub Pages version of a personal XAU/USD signal dashboard.
+GitHub Pages-only XAU/USD scalping dashboard.
 
-## What it does
+## Strategy stack
 
-- XAU/USD only
-- 1H directional bias
-- 15M primary setup
-- 5M entry confirmation
-- BUY / SELL / NO TRADE
-- Confidence score
-- Entry / SL / TP1 / TP2 / R:R
-- EMA 20/50/200, RSI, MACD, ATR, ADX
-- Market structure and market regime filters
-- Signal history stored locally in the browser
-- Refreshes market data every 60 seconds
+- 4H: macro context
+- 1H: directional bias
+- 15M: primary setup / regime
+- 5M: momentum confirmation
+- 1M: execution trigger
+- Always returns BUY or SELL; confidence is a confluence score, not a guaranteed probability.
 
-## Market data
+## Performance display
 
-The dashboard fetches XAU/USD candles from Twelve Data directly in the browser. On first launch, enter your Twelve Data API key in the dashboard. The key is stored in browser localStorage and is not committed to GitHub.
+The dashboard calculates a recent client-side backtest using synchronized historical candles. A trade is counted as a WIN when TP1 (1R) is touched before SL within the next 20 one-minute candles. If TP1 and SL are both touched inside the same 1M candle, the result is conservatively counted as LOSS because intrabar order is unknown.
+
+It displays:
+
+- Recent strategy win rate + N
+- Wins / losses / profit factor
+- Current-setup matched win rate + N
+
+These are historical measurements, not guarantees. Broker spread, slippage, execution latency, and fees are not included because the browser feed does not contain broker-specific execution data.
+
+## Data
+
+Twelve Data API key is stored only in browser localStorage. Initial load requests 1M, 5M, 15M, 1H, and 4H history. Subsequent auto-refreshes request 1M only and rebuild recent higher timeframes locally.
 
 ## Deploy
 
-This repository deploys with GitHub Actions to GitHub Pages. In repository Settings > Pages, set Source to GitHub Actions.
-
-Expected project URL:
-
-`https://rasyidsopian.github.io/rasyidsignalcall.forex/`
-
-## Important
-
-This is a research/personal signal tool, not an automated trading system. A 90%+ win rate is a research target and is not guaranteed or hardcoded.
+Push changes to `main`. `.github/workflows/pages.yml` builds `frontend/` and deploys `frontend/out` to GitHub Pages.

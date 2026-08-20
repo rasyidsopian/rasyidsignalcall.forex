@@ -1,4 +1,4 @@
-import type { Candle, Signal, TimeframeAnalysis } from "../types";
+import type { BacktestStats, BacktestTrade, Candle, Signal, TimeframeAnalysis } from "../types";
 
 type Structure = {
   direction: "BULLISH" | "BEARISH" | "RANGE";
@@ -7,6 +7,12 @@ type Structure = {
   breakout: boolean;
   retest: boolean;
 };
+
+const TF_MINUTES: Record<string, number> = { "1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240 };
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
 
 function ema(values: number[], period: number): number[] {
   if (period <= 0 || values.length < period) throw new Error("Not enough values for EMA");
@@ -84,7 +90,8 @@ function adx(highs: number[], lows: number[], closes: number[], period = 14): nu
     const denom = plusDi + minusDi;
     dx.push(denom ? (100 * Math.abs(plusDi - minusDi)) / denom : 0);
   }
-  if (dx.length < period) return dx.reduce((a, b) => a + b, 0) / Math.max(dx.length, 1);
+  if (!dx.length) return 0;
+  if (dx.length < period) return dx.reduce((a, b) => a + b, 0) / dx.length;
   let current = dx.slice(0, period).reduce((a, b) => a + b, 0) / period;
   for (const value of dx.slice(period)) current = (current * (period - 1) + value) / period;
   return current;
@@ -99,7 +106,12 @@ function bollingerWidth(values: number[], period = 20, deviations = 2): number {
   return mean === 0 ? 0 : ((mean + deviations * sd) - (mean - deviations * sd)) / mean;
 }
 
-function analyzeStructure(candles: Candle[], lookback = 30): Structure {
+function completedBefore(candles: Candle[], timeframe: string, evaluationMs: number): Candle[] {
+  const duration = (TF_MINUTES[timeframe] ?? 1) * 60_000;
+  return candles.filter((c) => new Date(c.timestamp).getTime() + duration <= evaluationMs + 1000);
+}
+
+function analyzeStructure(candles: Candle[], lookback = 24): Structure {
   if (candles.length < lookback + 3) throw new Error("Not enough candles for structure");
   const window = candles.slice(-lookback - 1, -1);
   const recent = candles.at(-1)!;
@@ -142,111 +154,238 @@ function classifyRegime(candles: Candle[]): string {
   if (strength >= 25 && ema20 < ema50) return "TRENDING_DOWN";
   if (strength < 18 && bbWidth < 0.01) return "LOW_VOLATILITY";
   if (strength < 22) return "RANGING";
-  return "UNCERTAIN";
+  return "MIXED";
 }
 
 function analyzeTimeframe(candles: Candle[], timeframe: string): TimeframeAnalysis {
   const closes = candles.map((c) => c.close);
   const highs = candles.map((c) => c.high);
   const lows = candles.map((c) => c.low);
-  const e20 = ema(closes, 20).at(-1)!;
-  const e50 = ema(closes, 50).at(-1)!;
-  const e200 = ema(closes, 200).at(-1)!;
+  if (closes.length < 205) throw new Error(`Not enough ${timeframe} candles`);
+
+  const e20Series = ema(closes, 20);
+  const e50Series = ema(closes, 50);
+  const e200Series = ema(closes, 200);
+  const e20 = e20Series.at(-1)!;
+  const e50 = e50Series.at(-1)!;
+  const e200 = e200Series.at(-1)!;
+  const e20Prev = e20Series.at(-4) ?? e20;
   const currentRsi = rsi(closes);
   const currentAdx = adx(highs, lows, closes);
   const [macdLine, macdSignal, histogram] = macd(closes);
   const structure = analyzeStructure(candles);
   const last = closes.at(-1)!;
+
   let bull = 0;
   let bear = 0;
   if (e20 > e50 && e50 > e200) bull += 30;
   else if (e20 < e50 && e50 < e200) bear += 30;
+  else if (e20 > e50) bull += 18;
+  else if (e20 < e50) bear += 18;
+
   if (last > e200) bull += 10;
   else if (last < e200) bear += 10;
-  if (currentRsi >= 52 && currentRsi <= 72) bull += 15;
-  else if (currentRsi >= 28 && currentRsi <= 48) bear += 15;
+
+  if (e20 > e20Prev) bull += 10;
+  else if (e20 < e20Prev) bear += 10;
+
+  if (currentRsi >= 55 && currentRsi <= 72) bull += 15;
+  else if (currentRsi > 72) bull += 8;
+  else if (currentRsi <= 45 && currentRsi >= 28) bear += 15;
+  else if (currentRsi < 28) bear += 8;
+
   if (macdLine > macdSignal && histogram > 0) bull += 15;
   else if (macdLine < macdSignal && histogram < 0) bear += 15;
-  if (structure.direction === "BULLISH") bull += 20;
-  else if (structure.direction === "BEARISH") bear += 20;
-  if (currentAdx >= 25) {
-    if (bull > bear) bull += 10;
-    else if (bear > bull) bear += 10;
+
+  if (structure.direction === "BULLISH") bull += 15;
+  else if (structure.direction === "BEARISH") bear += 15;
+
+  if (structure.breakout || structure.retest) {
+    if (last >= e20) bull += 5;
+    else bear += 5;
   }
-  let bias: TimeframeAnalysis["bias"] = "NEUTRAL";
-  let score = Math.max(bull, bear);
-  if (bull >= 60 && bull > bear) { bias = "BUY"; score = Math.min(bull, 100); }
-  else if (bear >= 60 && bear > bull) { bias = "SELL"; score = Math.min(bear, 100); }
+
+  if (currentAdx >= 25) {
+    if (bull > bear) bull += 5;
+    else if (bear > bull) bear += 5;
+  }
+
+  let directionalScore = clamp(bull - bear, -100, 100);
+  // Never leave the execution stack directionless. Use price/EMA slope as a small tie-breaker.
+  if (directionalScore === 0) directionalScore = last >= e50 ? 5 : -5;
+  const bias: TimeframeAnalysis["bias"] = directionalScore > 0 ? "BUY" : "SELL";
+  const score = clamp(Math.round(50 + Math.abs(directionalScore) * 0.5), 50, 100);
+  const emaState = e20 > e50 && e50 > e200 ? "BULL_STACK" : e20 < e50 && e50 < e200 ? "BEAR_STACK" : e20 >= e50 ? "BULL_LEAN" : "BEAR_LEAN";
+
   return {
     timeframe,
     bias,
     score,
+    directionalScore: Math.round(directionalScore),
     rsi: Math.round(currentRsi * 10) / 10,
     adx: Math.round(currentAdx * 10) / 10,
     structure: structure.direction,
+    emaState,
   };
 }
 
-function riskLevels(candles: Candle[], structure: Structure, side: "BUY" | "SELL") {
-  const highs = candles.map((c) => c.high);
-  const lows = candles.map((c) => c.low);
-  const closes = candles.map((c) => c.close);
+function riskLevels(c1: Candle[], side: "BUY" | "SELL") {
+  const highs = c1.map((c) => c.high);
+  const lows = c1.map((c) => c.low);
+  const closes = c1.map((c) => c.close);
   const currentAtr = atr(highs, lows, closes);
   const entry = closes.at(-1)!;
-  let stop: number;
-  let tp1: number;
-  let tp2: number;
+  const recent = c1.slice(-18);
+  const recentLow = Math.min(...recent.map((c) => c.low));
+  const recentHigh = Math.max(...recent.map((c) => c.high));
+  let risk: number;
   if (side === "BUY") {
-    const structuralStop = Math.min(structure.swingLow, entry - 1.2 * currentAtr);
-    stop = Math.max(structuralStop, entry - 2.2 * currentAtr);
-    const risk = entry - stop;
-    tp1 = entry + risk * 1.5;
-    tp2 = entry + risk * 2;
+    const structureRisk = Math.max(0, entry - recentLow + currentAtr * 0.12);
+    risk = clamp(Math.max(currentAtr * 1.05, structureRisk), currentAtr * 0.8, currentAtr * 2.0);
   } else {
-    const structuralStop = Math.max(structure.swingHigh, entry + 1.2 * currentAtr);
-    stop = Math.min(structuralStop, entry + 2.2 * currentAtr);
-    const risk = stop - entry;
-    tp1 = entry - risk * 1.5;
-    tp2 = entry - risk * 2;
+    const structureRisk = Math.max(0, recentHigh - entry + currentAtr * 0.12);
+    risk = clamp(Math.max(currentAtr * 1.05, structureRisk), currentAtr * 0.8, currentAtr * 2.0);
   }
-  const rr = Math.abs(tp2 - entry) / Math.max(Math.abs(entry - stop), 1e-9);
+  const stop = side === "BUY" ? entry - risk : entry + risk;
+  const tp1 = side === "BUY" ? entry + risk : entry - risk;
+  const tp2 = side === "BUY" ? entry + risk * 1.5 : entry - risk * 1.5;
   const round = (x: number) => Math.round(x * 100) / 100;
-  return { entry: round(entry), stop: round(stop), tp1: round(tp1), tp2: round(tp2), rr: round(rr) };
+  return { entry: round(entry), stop: round(stop), tp1: round(tp1), tp2: round(tp2), rr: 1.5 };
 }
 
-export function generateSignal(c5: Candle[], c15: Candle[], c1h: Candle[], minScore = 85, minRr = 1.5): Signal {
-  const analyses = [analyzeTimeframe(c5, "5m"), analyzeTimeframe(c15, "15m"), analyzeTimeframe(c1h, "1h")];
-  const [a5, a15, a1h] = analyses;
-  const regime = classifyRegime(c15);
-  const timestamp = new Date().toISOString();
-  const noTrade = (confidence: number, reasons: string[], rr: number | null = null): Signal => ({
-    symbol: "XAU/USD", signal: "NO_TRADE", confidence, entry_price: null, stop_loss: null,
-    take_profit_1: null, take_profit_2: null, risk_reward: rr, market_regime: regime, timestamp,
-    status: "WAITING", reasons, timeframe_analysis: analyses, strategy_name: "xau_confluence_client", strategy_version: "0.2.0",
-  });
+export function generateSignal(
+  c1Raw: Candle[],
+  c5Raw: Candle[],
+  c15Raw: Candle[],
+  c1hRaw: Candle[],
+  c4hRaw: Candle[],
+  evaluationMs?: number,
+): Signal {
+  const evalMs = evaluationMs ?? Date.now();
+  const c1 = completedBefore(c1Raw, "1m", evalMs);
+  const c5 = completedBefore(c5Raw, "5m", evalMs);
+  const c15 = completedBefore(c15Raw, "15m", evalMs);
+  const c1h = completedBefore(c1hRaw, "1h", evalMs);
+  const c4h = completedBefore(c4hRaw, "4h", evalMs);
 
-  const directional = a1h.bias !== "NEUTRAL" && a1h.bias === a15.bias && a15.bias === a5.bias;
-  if (!directional) return noTrade(Math.max(...analyses.map((a) => a.score)), ["Multi-timeframe alignment belum lengkap"]);
-  const side = a15.bias as "BUY" | "SELL";
-  const weightedScore = Math.round(a1h.score * 0.35 + a15.score * 0.45 + a5.score * 0.2);
-  const reasons: string[] = [];
-  if (a1h.adx < 20 || a15.adx < 20) reasons.push("Trend strength belum cukup");
-  if (["UNCERTAIN", "HIGH_VOLATILITY"].includes(regime)) reasons.push(`Market regime ${regime} difilter`);
-  if (weightedScore < minScore) reasons.push(`Confluence score ${weightedScore} di bawah threshold ${minScore}`);
-  if (reasons.length) return noTrade(weightedScore, reasons);
-  const structure = analyzeStructure(c15);
-  const levels = riskLevels(c15, structure, side);
-  if (levels.rr < minRr) return noTrade(weightedScore, [`Risk/reward ${levels.rr} < ${minRr}`], levels.rr);
+  const analyses = [
+    analyzeTimeframe(c4h, "4h"),
+    analyzeTimeframe(c1h, "1h"),
+    analyzeTimeframe(c15, "15m"),
+    analyzeTimeframe(c5, "5m"),
+    analyzeTimeframe(c1, "1m"),
+  ];
+  const [a4h, a1h, a15, a5, a1] = analyses;
+  const weights = [0.12, 0.23, 0.27, 0.23, 0.15];
+  const net = analyses.reduce((sum, a, i) => sum + a.directionalScore * weights[i], 0);
+  const side: "BUY" | "SELL" = net >= 0 ? "BUY" : "SELL";
+  const agreement = analyses.filter((a) => a.bias === side).length;
+  let confidence = Math.round(50 + Math.abs(net) * 0.45 + Math.max(0, agreement - 3) * 2);
+  confidence = clamp(confidence, 51, 97);
+  const regime = classifyRegime(c15);
+  const levels = riskLevels(c1, side);
+  const last1 = c1.at(-1)!;
+
+  const opposite = analyses.filter((a) => a.bias !== side).map((a) => a.timeframe.toUpperCase());
+  const reasons = [
+    `4H context ${a4h.bias} (${a4h.score}/100) · 1H bias ${a1h.bias} (${a1h.score}/100)`,
+    `15M setup ${a15.bias} · structure ${a15.structure.toLowerCase()} · ADX ${a15.adx}`,
+    `5M momentum ${a5.bias} · RSI ${a5.rsi} · ADX ${a5.adx}`,
+    `1M trigger ${a1.bias} · RSI ${a1.rsi} · EMA ${a1.emaState.replaceAll("_", " ").toLowerCase()}`,
+    `${agreement}/5 timeframe mendukung ${side}${opposite.length ? `; kontra: ${opposite.join(", ")}` : ""}`,
+    `Regime 15M: ${regime}`,
+  ];
+
   return {
-    symbol: "XAU/USD", signal: side, confidence: weightedScore, entry_price: levels.entry, stop_loss: levels.stop,
-    take_profit_1: levels.tp1, take_profit_2: levels.tp2, risk_reward: levels.rr, market_regime: regime, timestamp,
-    status: "ACTIVE", reasons: [
-      `1H, 15M, dan 5M aligned ${side}`,
-      `15M structure ${structure.direction.toLowerCase()}`,
-      `15M ADX ${a15.adx} menunjukkan trend strength memadai`,
-      `15M RSI ${a15.rsi} mendukung momentum`,
-      `Market regime: ${regime}`,
-      `Risk/reward ${levels.rr}:1`,
-    ], timeframe_analysis: analyses, strategy_name: "xau_confluence_client", strategy_version: "0.2.0",
+    symbol: "XAU/USD",
+    signal: side,
+    confidence,
+    entry_price: levels.entry,
+    stop_loss: levels.stop,
+    take_profit_1: levels.tp1,
+    take_profit_2: levels.tp2,
+    risk_reward: levels.rr,
+    market_regime: regime,
+    timestamp: new Date(new Date(last1.timestamp).getTime() + 60_000).toISOString(),
+    status: confidence >= 75 ? "HIGH_CONVICTION" : confidence >= 62 ? "VALID" : "LOW_EDGE",
+    reasons,
+    timeframe_analysis: analyses,
+    strategy_name: "xau_mtf_scalper",
+    strategy_version: "1.0.0",
   };
+}
+
+function statsFromTrades(trades: BacktestTrade[]): BacktestStats {
+  const wins = trades.filter((t) => t.result === "WIN").length;
+  const losses = trades.filter((t) => t.result === "LOSS").length;
+  const sampleSize = wins + losses;
+  return {
+    winRate: sampleSize ? Math.round((wins / sampleSize) * 1000) / 10 : null,
+    wins,
+    losses,
+    sampleSize,
+    profitFactor: losses ? Math.round((wins / losses) * 100) / 100 : wins ? 99 : null,
+    trades,
+  };
+}
+
+export function backtestStrategy(
+  c1: Candle[],
+  c5: Candle[],
+  c15: Candle[],
+  c1h: Candle[],
+  c4h: Candle[],
+  maxTrades = 120,
+): BacktestStats {
+  const trades: BacktestTrade[] = [];
+  const horizon = 20; // max holding time: 20 one-minute candles
+  const start = Math.max(230, c1.length - 1100);
+
+  for (let i = start; i < c1.length - horizon - 2; i += 5) {
+    const evaluationMs = new Date(c1[i].timestamp).getTime() + 60_000;
+    try {
+      const signal = generateSignal(
+        c1.slice(0, i + 1),
+        c5,
+        c15,
+        c1h,
+        c4h,
+        evaluationMs,
+      );
+      const future = c1.slice(i + 1, i + 1 + horizon);
+      let result: "WIN" | "LOSS" | null = null;
+      for (const bar of future) {
+        const slHit = signal.signal === "BUY" ? bar.low <= signal.stop_loss : bar.high >= signal.stop_loss;
+        const tpHit = signal.signal === "BUY" ? bar.high >= signal.take_profit_1 : bar.low <= signal.take_profit_1;
+        if (slHit && tpHit) { result = "LOSS"; break; } // conservative when intrabar order is unknown
+        if (slHit) { result = "LOSS"; break; }
+        if (tpHit) { result = "WIN"; break; }
+      }
+      if (result) {
+        trades.push({
+          timestamp: signal.timestamp,
+          side: signal.signal,
+          confidence: signal.confidence,
+          regime: signal.market_regime,
+          result,
+        });
+      }
+    } catch {
+      // Not enough synchronized history at this timestamp; skip without fabricating a result.
+    }
+  }
+
+  return statsFromTrades(trades.slice(-maxTrades));
+}
+
+export function matchingSetupStats(stats: BacktestStats, signal: Signal): BacktestStats {
+  const band = Math.floor(signal.confidence / 10) * 10;
+  let matches = stats.trades.filter(
+    (t) => t.side === signal.signal && t.regime === signal.market_regime && t.confidence >= band && t.confidence < band + 10,
+  );
+  if (matches.length < 12) {
+    matches = stats.trades.filter((t) => t.side === signal.signal && Math.abs(t.confidence - signal.confidence) <= 10);
+  }
+  if (matches.length < 12) matches = stats.trades.filter((t) => t.side === signal.signal);
+  return statsFromTrades(matches.slice(-60));
 }

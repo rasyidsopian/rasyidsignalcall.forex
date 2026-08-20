@@ -60,3 +60,26 @@ th { color: var(--muted); font-size: 11px; letter-spacing: .06em; }
 .error { margin-bottom: 18px; padding: 13px 16px; border: 1px solid rgba(239,79,95,.5); background: rgba(239,79,95,.08); border-radius: 12px; color: #ffbdc4; }
 @media (max-width: 980px) { .hero-grid, .lower-grid { grid-template-columns: 1fr; } }
 @media (max-width: 600px) { .shell { width: 94vw; padding-top: 18px; } .tf-row { grid-template-columns: 55px 90px 60px; } .tf-row small { grid-column: 1/-1; text-align: left; } }
+
+.subline { color: var(--muted); font-size: 13px; margin-top: 7px; }
+.connect-panel { margin-bottom: 18px; padding-bottom: 18px; }
+.connect-panel p { color: #9ba7bd; padding: 0 18px; }
+.connect-row { display: flex; gap: 10px; flex-wrap: wrap; padding: 0 18px; }
+.connect-row input { flex: 1; min-width: 260px; background: #0b1020; color: white; border: 1px solid #25304a; border-radius: 8px; padding: 12px 14px; }
+.connect-row button, .toolbar button { padding: 10px 14px; border-radius: 8px; border: 1px solid #33405d; background: #141c2f; color: var(--text); cursor: pointer; font-weight: 800; }
+.toolbar { display: grid; grid-template-columns: auto 1fr auto; gap: 16px; align-items: center; margin-bottom: 14px; color: #9ba7bd; font-size: 12px; }
+.toolbar > div { display: flex; gap: 8px; }
+.usage-note { text-align: center; color: #6f7c93; }
+.winrate-block { margin: 0 22px 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.02); }
+.winrate-block div { display: flex; flex-direction: column; gap: 4px; }
+.winrate-block small { color: var(--muted); font-size: 10px; letter-spacing: .07em; font-weight: 800; }
+.winrate-block strong { font-size: 23px; }
+.sample-badge { grid-column: 1/-1; color: var(--gold); font-size: 10px; font-weight: 900; letter-spacing: .1em; }
+.stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 18px; }
+.metric-card { padding-bottom: 20px; }
+.metric-main { padding: 20px 22px 0; font-size: 46px; font-weight: 900; letter-spacing: -.04em; }
+.metric-caption { padding: 0 22px 16px; color: var(--muted); }
+.mini-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; border-top: 1px solid var(--line); background: var(--line); }
+.mini-metrics span { padding: 14px 18px; background: var(--panel); color: var(--muted); font-size: 10px; letter-spacing: .06em; font-weight: 800; display: flex; flex-direction: column; gap: 5px; }
+.mini-metrics strong { color: var(--text); font-size: 15px; letter-spacing: 0; }
+@media (max-width: 980px) { .stats-grid { grid-template-columns: 1fr; } .toolbar { grid-template-columns: 1fr; } .usage-note { text-align: left; } }
