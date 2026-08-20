@@ -1,5 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'standalone'
+  output: 'export',
+  basePath: '/rasyidsignalcall.forex',
+  assetPrefix: '/rasyidsignalcall.forex/',
+  trailingSlash: true,
+  images: { unoptimized: true }
 };
 export default nextConfig;

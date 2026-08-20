@@ -2,66 +2,132 @@
 
 import { useEffect, useMemo, useState } from "react";
 import CandleChart from "./CandleChart";
-import { getCandles, getHistory, getSignal, WS_URL } from "../lib/api";
+import { clearApiKey, fetchAllTimeframes, getSavedApiKey, saveApiKey } from "../lib/marketData";
+import { generateSignal } from "../lib/signalEngine";
 import type { Candle, Signal } from "../types";
+
+type HistoryRow = Signal & { id: string; created_at: string };
 
 function price(value: number | null) {
   return value == null ? "—" : value.toFixed(2);
 }
 
+function loadHistory(): HistoryRow[] {
+  try { return JSON.parse(localStorage.getItem("xau_signal_history") ?? "[]"); }
+  catch { return []; }
+}
+
+function saveHistory(rows: HistoryRow[]) {
+  localStorage.setItem("xau_signal_history", JSON.stringify(rows.slice(0, 100)));
+}
+
 export default function Dashboard() {
+  const [apiKey, setApiKey] = useState("");
+  const [draftKey, setDraftKey] = useState("");
   const [signal, setSignal] = useState<Signal | null>(null);
   const [candles, setCandles] = useState<Candle[]>([]);
-  const [history, setHistory] = useState<any[]>([]);
+  const [history, setHistory] = useState<HistoryRow[]>([]);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
-  async function hydrate() {
+  useEffect(() => {
+    const saved = getSavedApiKey();
+    setApiKey(saved);
+    setDraftKey(saved);
+    setHistory(loadHistory());
+  }, []);
+
+  async function refresh(key = apiKey) {
+    if (!key) return;
+    setLoading(true);
     try {
-      const [s, c, h] = await Promise.all([getSignal(), getCandles(), getHistory()]);
-      setSignal(s);
-      setCandles(c);
-      setHistory(h.items);
+      const { c5, c15, c1h } = await fetchAllTimeframes(key);
+      const next = generateSignal(c5, c15, c1h);
+      setCandles(c15);
+      setSignal(next);
+      setConnected(true);
       setError(null);
+      setLastUpdated(new Date().toISOString());
+      if (next.signal === "BUY" || next.signal === "SELL") {
+        const candleId = c15.at(-1)?.timestamp ?? next.timestamp;
+        const id = `${candleId}-${next.signal}`;
+        setHistory((previous) => {
+          if (previous.some((row) => row.id === id)) return previous;
+          const rows = [{ ...next, id, created_at: next.timestamp }, ...previous].slice(0, 100);
+          saveHistory(rows);
+          return rows;
+        });
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Unknown API error");
+      setConnected(false);
+      setError(e instanceof Error ? e.message : "Market data error");
+    } finally {
+      setLoading(false);
     }
   }
 
   useEffect(() => {
-    hydrate();
-    const chartTimer = window.setInterval(() => getCandles().then(setCandles).catch(() => {}), 60_000);
-    const ws = new WebSocket(`${WS_URL}/api/ws/signals`);
-    ws.onopen = () => {
-      setConnected(true);
-      ws.send("ready");
-    };
-    ws.onmessage = (event) => {
-      const payload = JSON.parse(event.data);
-      if (payload.symbol === "XAU/USD") setSignal(payload);
-    };
-    ws.onclose = () => setConnected(false);
-    ws.onerror = () => setConnected(false);
-    return () => {
-      window.clearInterval(chartTimer);
-      ws.close();
-    };
-  }, []);
+    if (!apiKey) return;
+    refresh(apiKey);
+    const timer = window.setInterval(() => refresh(apiKey), 60_000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiKey]);
 
   const currentPrice = useMemo(() => candles.at(-1)?.close ?? signal?.entry_price ?? null, [candles, signal]);
   const tone = signal?.signal === "BUY" ? "buy" : signal?.signal === "SELL" ? "sell" : "neutral";
 
+  function connectKey() {
+    const key = draftKey.trim();
+    if (!key) return;
+    saveApiKey(key);
+    setApiKey(key);
+  }
+
+  function disconnectKey() {
+    clearApiKey();
+    setApiKey("");
+    setDraftKey("");
+    setConnected(false);
+    setSignal(null);
+    setCandles([]);
+  }
+
   return (
     <main className="shell">
       <header className="topbar">
-        <div>
-          <div className="eyebrow">RASYID SIGNAL CALL</div>
-          <h1>XAU/USD</h1>
-        </div>
-        <div className={`status ${connected ? "online" : "offline"}`}>
-          <span /> {connected ? "LIVE" : "RECONNECTING"}
-        </div>
+        <div><div className="eyebrow">RASYID SIGNAL CALL</div><h1>XAU/USD</h1></div>
+        <div className={`status ${connected ? "online" : "offline"}`}><span /> {connected ? "LIVE" : apiKey ? "RECONNECTING" : "API KEY REQUIRED"}</div>
       </header>
+
+      {!apiKey && (
+        <section className="panel" style={{ marginBottom: 18 }}>
+          <div className="panel-head"><span>CONNECT MARKET DATA</span><span>Twelve Data</span></div>
+          <p style={{ color: "#9ba7bd", marginTop: 0 }}>Masukkan API key Twelve Data. Key disimpan hanya di browser ini (localStorage), bukan di GitHub.</p>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <input
+              value={draftKey}
+              onChange={(e) => setDraftKey(e.target.value)}
+              placeholder="Paste Twelve Data API key"
+              type="password"
+              style={{ flex: 1, minWidth: 260, background: "#0b1020", color: "white", border: "1px solid #25304a", borderRadius: 8, padding: "12px 14px" }}
+            />
+            <button onClick={connectKey} style={{ padding: "12px 18px", borderRadius: 8, border: 0, cursor: "pointer", fontWeight: 700 }}>CONNECT</button>
+          </div>
+        </section>
+      )}
+
+      {apiKey && (
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 14, color: "#9ba7bd", fontSize: 13 }}>
+          <span>{lastUpdated ? `Last update ${new Date(lastUpdated).toLocaleTimeString()}` : "Waiting for first update..."}</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => refresh()} disabled={loading} style={{ cursor: "pointer" }}>{loading ? "REFRESHING..." : "REFRESH NOW"}</button>
+            <button onClick={disconnectKey} style={{ cursor: "pointer" }}>CHANGE API KEY</button>
+          </div>
+        </div>
+      )}
 
       {error && <div className="error">{error}</div>}
 
@@ -73,11 +139,9 @@ export default function Dashboard() {
         </article>
 
         <aside className={`panel signal-panel ${tone}`}>
-          <div className="panel-head"><span>CURRENT SIGNAL</span><span>{signal?.status ?? "LOADING"}</span></div>
+          <div className="panel-head"><span>CURRENT SIGNAL</span><span>{signal?.status ?? "WAITING"}</span></div>
           <div className="signal-name">{signal?.signal?.replace("_", " ") ?? "—"}</div>
-          <div className="confidence">
-            <span>{signal?.confidence ?? 0}</span><small>/100 confidence</small>
-          </div>
+          <div className="confidence"><span>{signal?.confidence ?? 0}</span><small>/100 confidence</small></div>
           <div className="levels">
             <div><small>ENTRY</small><strong>{price(signal?.entry_price ?? null)}</strong></div>
             <div><small>STOP LOSS</small><strong>{price(signal?.stop_loss ?? null)}</strong></div>
@@ -106,20 +170,16 @@ export default function Dashboard() {
 
         <article className="panel">
           <div className="panel-head"><span>WHY THIS SIGNAL?</span><span>{signal?.strategy_version ?? "v—"}</span></div>
-          <ul className="reasons">
-            {(signal?.reasons ?? ["Waiting for analysis..."]).map((reason) => <li key={reason}>{reason}</li>)}
-          </ul>
-          <div className="research-note">90%+ is a research target, not a guaranteed win rate. NO TRADE is preferred when confluence is insufficient.</div>
+          <ul className="reasons">{(signal?.reasons ?? ["Waiting for market data..."]).map((reason) => <li key={reason}>{reason}</li>)}</ul>
+          <div className="research-note">90%+ adalah target riset, bukan guaranteed win rate. NO TRADE diprioritaskan saat confluence tidak cukup.</div>
         </article>
       </section>
 
       <section className="panel history">
-        <div className="panel-head"><span>SIGNAL HISTORY</span><span>Issued BUY/SELL only</span></div>
-        {history.length === 0 ? (
-          <div className="empty">No qualifying signal has been issued yet.</div>
-        ) : (
+        <div className="panel-head"><span>SIGNAL HISTORY</span><span>Stored in this browser</span></div>
+        {history.length === 0 ? <div className="empty">Belum ada BUY/SELL yang lolos high-precision filter.</div> : (
           <div className="table-wrap"><table><thead><tr><th>Time</th><th>Signal</th><th>Confidence</th><th>Entry</th><th>SL</th><th>TP2</th><th>R:R</th></tr></thead><tbody>
-          {history.map((row) => <tr key={row.id}><td>{new Date(row.created_at).toLocaleString()}</td><td><span className={`pill ${row.signal.toLowerCase()}`}>{row.signal}</span></td><td>{row.confidence}</td><td>{price(row.entry_price)}</td><td>{price(row.stop_loss)}</td><td>{price(row.take_profit_2)}</td><td>{row.risk_reward ? `1:${row.risk_reward}` : "—"}</td></tr>)}
+            {history.map((row) => <tr key={row.id}><td>{new Date(row.created_at).toLocaleString()}</td><td><span className={`pill ${row.signal.toLowerCase()}`}>{row.signal}</span></td><td>{row.confidence}</td><td>{price(row.entry_price)}</td><td>{price(row.stop_loss)}</td><td>{price(row.take_profit_2)}</td><td>{row.risk_reward ? `1:${row.risk_reward}` : "—"}</td></tr>)}
           </tbody></table></div>
         )}
       </section>
