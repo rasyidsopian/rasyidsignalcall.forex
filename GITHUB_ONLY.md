@@ -1,17 +1,10 @@
-# Deploy V6 on GitHub Pages
+# Browser-only deploy
 
-1. Extract the ZIP.
-2. Open the extracted `rasyidsignalcall.scalping-v6` folder.
-3. In the GitHub repository, choose **Code → Add file → Upload files**.
-4. Upload the contents of the folder, not the wrapper folder itself.
-5. Commit to `main` with message: `Deploy XAUUSD tight scalp V6`.
-6. Wait for **Deploy GitHub Pages** to turn green in Actions.
-7. Open the Pages URL and hard-refresh (`Ctrl+F5`).
+1. Open the GitHub repository.
+2. Code → Add file → Upload files.
+3. Upload the **contents** of this folder, not the wrapper folder.
+4. Commit to `main` with message: `Deploy XAUUSD mapped-entry V7`.
+5. Wait for **Deploy GitHub Pages** to turn green.
+6. Open the Pages URL and hard-refresh with Ctrl+F5.
 
-Expected paths include:
-
-- `frontend/lib/strategyV6.ts`
-- `frontend/lib/marketData.ts`
-- `frontend/components/Dashboard.tsx`
-- `frontend/components/CandleChart.tsx`
-- `.github/workflows/pages.yml`
+Expected header: `RASYID SIGNAL CALL · XAUUSD V7 MAPPED ENTRY`.

@@ -3,8 +3,8 @@ import type { Candle } from "../types";
 const BASE = "https://api.twelvedata.com/time_series";
 const WS_BASE = "wss://ws.twelvedata.com/v1/quotes/price";
 const KEY_NAME = "twelve_data_api_key";
-const FRAME_CACHE = "xau_scalp_frames_v6";
-const FRAME_CACHE_AT = "xau_scalp_frames_v6_at";
+const FRAME_CACHE = "xau_scalp_frames_v7";
+const FRAME_CACHE_AT = "xau_scalp_frames_v7_at";
 const CACHE_MAX_AGE_MS = 4 * 60 * 60_000;
 
 export type MarketFrames = {
@@ -18,7 +18,12 @@ export type MarketFrames = {
 export type RealtimeTick = {
   symbol: string;
   price: number;
+  /** Browser receive time: used for current-candle bucketing so chart follows the actual arrival clock. */
   timestampMs: number;
+  /** Provider timestamp when available; diagnostic only because provider timestamps can be coarse/stale. */
+  sourceTimestampMs: number | null;
+  receivedAtMs: number;
+  receivedPerfMs: number;
 };
 
 export type StreamState = "CONNECTING" | "LIVE" | "RECONNECTING" | "CLOSED";
@@ -322,12 +327,26 @@ export function connectRealtimeXauUsd(
           return;
         }
         if (payload?.event === "price" || payload?.price != null) {
+          const receiveWallMs = Date.now();
+          const receivePerfMs = performance.now();
           const price = Number(payload.price);
           const rawTs = Number(payload.timestamp);
-          const timestampMs = Number.isFinite(rawTs) ? (rawTs > 10_000_000_000 ? rawTs : rawTs * 1000) : Date.now();
+          const sourceTimestampMs = Number.isFinite(rawTs)
+            ? (rawTs > 10_000_000_000 ? rawTs : rawTs * 1000)
+            : null;
           if (Number.isFinite(price) && price > 0) {
             handlers.onState?.("LIVE");
-            handlers.onTick({ symbol: String(payload.symbol ?? "XAU/USD"), price, timestampMs });
+            // V7: bucket the live candle by browser receive time. This avoids a visibly stale chart
+            // when the upstream event timestamp is coarse or delayed. Source timestamp is kept only
+            // for diagnostics; it is not mislabeled as application latency.
+            handlers.onTick({
+              symbol: String(payload.symbol ?? "XAU/USD"),
+              price,
+              timestampMs: receiveWallMs,
+              sourceTimestampMs,
+              receivedAtMs: receiveWallMs,
+              receivedPerfMs: receivePerfMs,
+            });
           }
         }
       } catch {
