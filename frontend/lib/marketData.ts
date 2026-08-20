@@ -3,8 +3,8 @@ import type { Candle } from "../types";
 const BASE = "https://api.twelvedata.com/time_series";
 const WS_BASE = "wss://ws.twelvedata.com/v1/quotes/price";
 const KEY_NAME = "twelve_data_api_key";
-const FRAME_CACHE = "xau_scalp_frames_v4";
-const FRAME_CACHE_AT = "xau_scalp_frames_v4_at";
+const FRAME_CACHE = "xau_scalp_frames_v5";
+const FRAME_CACHE_AT = "xau_scalp_frames_v5_at";
 const CACHE_MAX_AGE_MS = 4 * 60 * 60_000;
 
 export type MarketFrames = {

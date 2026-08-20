@@ -1,37 +1,28 @@
-# Rasyid Signal Call — XAU/USD Realtime Scalping V4
+# Rasyid Signal Call — XAU/USD V5
 
-GitHub Pages dashboard for personal XAU/USD scalping research.
+GitHub Pages dashboard for personal XAU/USD analysis.
 
-## V4 changes
+## V5 changes
 
-- Realtime 1M chart hardened against stale/out-of-order ticks and duplicate timestamps.
-- New cache namespace prevents corrupted/stale V3 frame data from carrying over.
-- Chart redraw fallback automatically restores candles if an incremental update fails.
-- Signal engine recalculates up to every 100 ms when new WebSocket ticks arrive.
-- BUY/SELL direction is now dominated by 1M + 5M (80% combined weight).
-- 15M is setup context; 1H/4H are secondary context filters.
-- Execution is separated into `ENTER NOW` vs `WAIT PULLBACK` while directional BUY/SELL remains visible.
-- Stop placement uses confirmed micro swing / liquidity sweep plus ATR buffer to reduce overly tight stops.
-- TP1 targets about 1.6R and TP2 targets about 2.2R, with TP2 capped before nearby 5M structure when appropriate.
-- Historical win rate is calculated only from closed-candle setups that the engine itself marked `ENTER NOW`.
+- separates **Scalping Setup** from **Daily Setup**
+- realtime WebSocket tick chart; current 1M candle updates on every received provider tick
+- optimized chart hot path (only current candle updates between minute rolls)
+- scalp setup focuses on **5M + 1M execution**, with 15M structure confirmation
+- daily setup focuses on **4H + 1H + 15M**
+- explicit **ENTER NOW / WAIT / NO ENTRY RISK / MARKET CLOSED** gate
+- two-position plan: default **2 × 0.01 lot**
+- default balance **Rp1,000,000**
+- broker-aware risk calculator using configurable contract size and USD/IDR estimate
+- position #1 targets ~1.5R; position #2 targets ~2.5R when liquidity space permits
+- BE guidance delays stop-to-entry until TP1 + 1M confirmation
+- 1 / 5 / 10 minute scenario projections (edge score, not guaranteed probability)
+- Saturday mode: standard XAU/USD is treated as closed/preparation-only unless actual live ticks are present
+- backtest metrics remain closed-candle based; no fabricated win rate
 
-## Realtime architecture
+## Important risk note
 
-- Historical initialization: Twelve Data REST `/time_series`
-- Realtime stream: Twelve Data WebSocket `/v1/quotes/price`
-- Symbol: XAU/USD only
-- Analysis stack: 4H / 1H context → 15M setup → 5M + 1M execution
-- Live 1M candle built from price ticks
-- Current 5M/15M/1H/4H candles updated locally from the same tick stream
-
-## Important
-
-The displayed historical win rate is calculated from the available recent closed-candle sample. It is not a guaranteed future win rate. The live confluence score is not a probability of winning. ATR/swing-buffer stop placement may reduce overly tight stops but cannot guarantee avoidance of stop-outs or so-called stop hunting.
+Default risk math assumes 1 standard XAU/USD lot = 100 oz. Broker contract specifications can differ. The dashboard therefore exposes contract size and USD/IDR as editable settings. With a Rp1,000,000 account, **2 × 0.01 lot can easily exceed a reasonable percentage risk if a structurally valid gold stop is several dollars wide**. V5 does not shrink the stop just to force a trade; it returns NO ENTRY when the configured position size is too large for the risk budget.
 
 ## GitHub Pages
 
-The custom GitHub Actions workflow builds `frontend/` as a static Next.js export and publishes `frontend/out`.
-
-## API key
-
-Because GitHub Pages is a client-side static site, the Twelve Data key is stored in the user's browser and is used directly by REST/WebSocket requests. This is suitable only for a personal dashboard. A server-side proxy would be required to keep a shared key private.
+Upload the contents of this folder to the repository root. GitHub Actions deploys `frontend/out` automatically.

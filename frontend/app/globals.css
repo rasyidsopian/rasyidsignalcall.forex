@@ -94,3 +94,47 @@ th { color: var(--muted); font-size: 11px; letter-spacing: .06em; }
 .execution-box.ready strong { color: var(--buy); }
 .execution-box.wait { border-color: rgba(233,185,73,.35); background: rgba(233,185,73,.05); }
 .execution-box.wait strong { color: var(--gold); }
+
+/* V5 */
+.v5-hero { grid-template-columns: minmax(0, 1.65fr) minmax(370px, .95fr); align-items: start; }
+.side-stack { display: grid; gap: 18px; }
+.setup-card { position: relative; }
+.setup-card::before { content:""; position:absolute; inset:0 auto 0 0; width:3px; background:#66738a; }
+.setup-card.buy::before { background: var(--buy); }
+.setup-card.sell::before { background: var(--sell); }
+.setup-call { display:flex; align-items:baseline; justify-content:space-between; gap:12px; padding:20px 22px 12px; }
+.setup-call strong { font-size:36px; letter-spacing:-.04em; }
+.setup-card.buy .setup-call strong { color:var(--buy); }
+.setup-card.sell .setup-call strong { color:var(--sell); }
+.setup-call span { color:var(--muted); font-size:12px; }
+.risk-gate { margin:0 22px 14px; padding:12px 14px; border-radius:12px; border:1px solid var(--line); display:grid; gap:5px; }
+.risk-gate strong { font-size:15px; }
+.risk-gate span, .risk-gate small { color:var(--muted); font-size:11px; line-height:1.4; }
+.risk-gate.pass { border-color:rgba(25,195,125,.38); background:rgba(25,195,125,.06); }
+.risk-gate.pass strong { color:var(--buy); }
+.risk-gate.fail { border-color:rgba(239,79,95,.42); background:rgba(239,79,95,.06); }
+.risk-gate.fail strong { color:#ff7b88; }
+.risk-gate.wait { border-color:rgba(233,185,73,.4); background:rgba(233,185,73,.05); }
+.risk-gate.wait strong { color:var(--gold); }
+.levels.compact div { padding:12px 18px; }
+.levels.compact strong { font-size:16px; }
+.be-note { display:grid; gap:5px; padding:14px 20px 18px; }
+.be-note strong { color:var(--gold); font-size:11px; letter-spacing:.08em; }
+.be-note span { color:var(--muted); font-size:11px; line-height:1.45; }
+.weekend-banner { margin-bottom:16px; border:1px solid rgba(233,185,73,.45); background:rgba(233,185,73,.08); border-radius:14px; padding:13px 16px; display:flex; gap:12px; align-items:flex-start; }
+.weekend-banner strong { color:var(--gold); white-space:nowrap; }
+.weekend-banner span { color:#d6ddea; line-height:1.45; }
+.account-panel, .prediction-panel { margin-top:18px; }
+.account-grid { display:grid; grid-template-columns:repeat(5, minmax(120px,1fr)); gap:10px; padding:16px 18px 10px; }
+.account-grid label { display:grid; gap:6px; color:var(--muted); font-size:11px; font-weight:800; letter-spacing:.04em; }
+.account-grid input { width:100%; background:#0b1020; color:var(--text); border:1px solid #25304a; border-radius:8px; padding:10px 11px; }
+.risk-warning { color:var(--muted); font-size:11px; line-height:1.5; padding:0 18px 16px; }
+.prediction-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; padding:16px 18px 18px; }
+.prediction { border:1px solid var(--line); border-radius:12px; padding:14px; display:grid; gap:7px; background:rgba(255,255,255,.02); }
+.prediction > div { display:flex; justify-content:space-between; align-items:center; }
+.prediction b { font-size:20px; }
+.prediction small { color:var(--muted); }
+.prediction.buy { border-color:rgba(25,195,125,.25); }
+.prediction.sell { border-color:rgba(239,79,95,.25); }
+@media (max-width:1100px) { .v5-hero { grid-template-columns:1fr; } .account-grid { grid-template-columns:repeat(2,1fr); } }
+@media (max-width:700px) { .prediction-grid { grid-template-columns:1fr; } .account-grid { grid-template-columns:1fr; } .weekend-banner { flex-direction:column; } }

@@ -16,371 +16,283 @@ import {
   type StreamState,
 } from "../lib/marketData";
 import { backtestStrategy, generateSignal, matchingSetupStats } from "../lib/signalEngine";
-import type { BacktestStats, Signal } from "../types";
+import {
+  buildDailySetup,
+  buildPredictions,
+  buildScalpingSetup,
+  DEFAULT_ACCOUNT,
+  type AccountConfig,
+  type HorizonPrediction,
+  type TradeSetup,
+} from "../lib/strategyV5";
+import type { BacktestStats } from "../types";
 
-type HistoryRow = Signal & { id: string; created_at: string };
-type PendingFlip = { side: "BUY" | "SELL"; count: number; since: number; signal: Signal } | null;
+type FrozenRow = {
+  id: string;
+  at: string;
+  side: "BUY" | "SELL";
+  action: string;
+  entry: number;
+  stop: number;
+  tp1: number;
+  tp2: number;
+  riskPct: number;
+  confidence: number;
+};
 
-function price(value: number | null | undefined) {
-  return value == null ? "—" : value.toFixed(2);
+const money = new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 });
+const px = (v: number | null | undefined) => v == null || !Number.isFinite(v) ? "—" : v.toFixed(2);
+const pct = (v: number | null | undefined) => v == null ? "—" : `${v.toFixed(1)}%`;
+
+function loadAccount(): AccountConfig {
+  try {
+    const saved = JSON.parse(localStorage.getItem("xau_v5_account") ?? "null");
+    return saved ? { ...DEFAULT_ACCOUNT, ...saved } : DEFAULT_ACCOUNT;
+  } catch { return DEFAULT_ACCOUNT; }
+}
+function loadHistory(): FrozenRow[] {
+  try { return JSON.parse(localStorage.getItem("xau_v5_history") ?? "[]"); } catch { return []; }
 }
 
-function percent(value: number | null | undefined) {
-  return value == null ? "—" : `${value.toFixed(1)}%`;
+function RiskLine({ setup }: { setup: TradeSetup | null }) {
+  if (!setup) return null;
+  const risk = setup.risk;
+  return (
+    <div className={`risk-gate ${risk.action === "ENTER_NOW" ? "pass" : risk.action === "SKIP_RISK" ? "fail" : "wait"}`}>
+      <strong>{setup.status}</strong>
+      <span>{risk.message}</span>
+      <small>
+        Risk {money.format(risk.riskIdr)} ({risk.riskPct.toFixed(1)}%) · max {risk.maxRiskPct.toFixed(1)}% · blended R:R 1:{risk.blendedRewardR.toFixed(2)}
+      </small>
+    </div>
+  );
 }
 
-function loadHistory(): HistoryRow[] {
-  try { return JSON.parse(localStorage.getItem("xau_scalp_signal_history_v4") ?? "[]"); }
-  catch { return []; }
+function SetupCard({ title, setup, showRisk = true }: { title: string; setup: TradeSetup | null; showRisk?: boolean }) {
+  const tone = setup?.side.toLowerCase() ?? "neutral";
+  return (
+    <article className={`panel setup-card ${tone}`}>
+      <div className="panel-head"><span>{title}</span><span>{setup?.status ?? "WAITING"}</span></div>
+      <div className="setup-call"><strong>{setup?.side ?? "—"}</strong><span>{setup?.confidence ?? 0}/100 confluence</span></div>
+      {showRisk && <RiskLine setup={setup} />}
+      <div className="levels compact">
+        <div><small>ENTRY</small><strong>{px(setup?.entry)}</strong></div>
+        <div><small>STOP</small><strong>{px(setup?.stop)}</strong></div>
+        <div><small>POS #1 TP · {setup?.rr1?.toFixed(1) ?? "—"}R</small><strong>{px(setup?.tp1)}</strong></div>
+        <div><small>POS #2 TP · {setup?.rr2?.toFixed(1) ?? "—"}R</small><strong>{px(setup?.tp2)}</strong></div>
+      </div>
+      <div className="be-note"><strong>BE rule</strong><span>{setup?.beRule ?? "—"}</span></div>
+    </article>
+  );
 }
 
-function saveHistory(rows: HistoryRow[]) {
-  localStorage.setItem("xau_scalp_signal_history_v4", JSON.stringify(rows.slice(0, 180)));
+function PredictionCard({ row }: { row: HorizonPrediction }) {
+  return (
+    <div className={`prediction ${row.bias.toLowerCase()}`}>
+      <div><strong>{row.minutes} MIN</strong><span className={`pill ${row.bias.toLowerCase()}`}>{row.bias}</span></div>
+      <b>{row.edgeScore}/100 edge</b>
+      <small>Projected {px(row.projectedLow)} – {px(row.projectedHigh)}</small>
+      <small>{row.alignment} with scalp call</small>
+    </div>
+  );
 }
 
 export default function Dashboard() {
   const [apiKey, setApiKey] = useState("");
   const [draftKey, setDraftKey] = useState("");
-  const [signal, setSignal] = useState<Signal | null>(null);
-  const signalRef = useRef<Signal | null>(null);
   const [frames, setFrames] = useState<MarketFrames | null>(null);
   const framesRef = useRef<MarketFrames | null>(null);
-  const [history, setHistory] = useState<HistoryRow[]>([]);
+  const [scalp, setScalp] = useState<TradeSetup | null>(null);
+  const scalpRef = useRef<TradeSetup | null>(null);
+  const [daily, setDaily] = useState<TradeSetup | null>(null);
+  const [predictions, setPredictions] = useState<HorizonPrediction[]>([]);
+  const [account, setAccount] = useState<AccountConfig>(DEFAULT_ACCOUNT);
   const [backtest, setBacktest] = useState<BacktestStats | null>(null);
   const [setupStats, setSetupStats] = useState<BacktestStats | null>(null);
+  const [history, setHistory] = useState<FrozenRow[]>([]);
   const [streamState, setStreamState] = useState<StreamState>("CLOSED");
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
-  const [lastTickAt, setLastTickAt] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
   const [tickCount, setTickCount] = useState(0);
-  const lastSignalCalcRef = useRef(0);
-  const pendingFlipRef = useRef<PendingFlip>(null);
+  const [lastTickAt, setLastTickAt] = useState<number | null>(null);
+  const [clock, setClock] = useState(Date.now());
+  const lastCalcRef = useRef(0);
+  const lastDailyCalcRef = useRef(0);
 
   useEffect(() => {
-    const saved = getSavedApiKey();
-    setApiKey(saved);
-    setDraftKey(saved);
-    setHistory(loadHistory());
+    const key = getSavedApiKey();
+    setApiKey(key); setDraftKey(key);
+    setAccount(loadAccount()); setHistory(loadHistory());
+    const timer = window.setInterval(() => setClock(Date.now()), 500);
+    return () => window.clearInterval(timer);
   }, []);
 
-  function publishSignal(next: Signal) {
-    signalRef.current = next;
-    setSignal(next);
+  useEffect(() => {
+    try { localStorage.setItem("xau_v5_account", JSON.stringify(account)); } catch {}
+    const f = framesRef.current;
+    if (f) recalcAll(f, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account]);
+
+  function recalcResearch(next: MarketFrames) {
+    try {
+      const bt = backtestStrategy(next.c1, next.c5, next.c15, next.c1h, next.c4h, 180);
+      setBacktest(bt);
+      const core = generateSignal(next.c1, next.c5, next.c15, next.c1h, next.c4h, Date.now(), true);
+      setSetupStats(matchingSetupStats(bt, core));
+    } catch {}
   }
 
-  function recalcResearch(nextFrames: MarketFrames, currentSignal?: Signal) {
-    const bt = backtestStrategy(nextFrames.c1, nextFrames.c5, nextFrames.c15, nextFrames.c1h, nextFrames.c4h, 160);
-    setBacktest(bt);
-    const basis = currentSignal ?? signalRef.current;
-    if (basis) setSetupStats(matchingSetupStats(bt, basis));
+  function recalcAll(next: MarketFrames, includeDaily = false, nowMs = Date.now()) {
+    try {
+      const s = buildScalpingSetup(next, account, nowMs);
+      scalpRef.current = s; setScalp(s);
+      setPredictions(buildPredictions(next, s));
+    } catch {}
+    if (includeDaily || nowMs - lastDailyCalcRef.current > 15_000) {
+      lastDailyCalcRef.current = nowMs;
+      try { setDaily(buildDailySetup(next, account, nowMs)); } catch {}
+    }
   }
 
   async function loadMarket(key: string) {
-    setLoading(true);
-    setReady(false);
-    setError(null);
+    setLoading(true); setReady(false); setError(null);
     try {
       const cached = getCachedFrames();
-      // Cached startup costs only 1 REST call to fill the gap. True cold start costs 5 sequential calls.
-      const nextFrames = cached ? await refreshFromOneMinute(key, cached) : await fetchAllTimeframes(key);
-      framesRef.current = nextFrames;
-      setFrames(nextFrames);
-      const live = generateSignal(nextFrames.c1, nextFrames.c5, nextFrames.c15, nextFrames.c1h, nextFrames.c4h, Date.now(), true);
-      publishSignal(live);
-      recalcResearch(nextFrames, live);
+      const next = cached ? await refreshFromOneMinute(key, cached) : await fetchAllTimeframes(key);
+      framesRef.current = next; setFrames(next);
+      recalcAll(next, true); recalcResearch(next);
       setReady(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Market data initialization error");
-      setReady(false);
-    } finally {
-      setLoading(false);
-    }
+    } catch (e) { setError(e instanceof Error ? e.message : "Market data initialization error"); }
+    finally { setLoading(false); }
   }
 
   async function syncHistory() {
-    const key = apiKey;
-    const current = framesRef.current;
-    if (!key || !current || loading) return;
+    if (!apiKey || !framesRef.current || loading) return;
     setLoading(true);
     try {
-      const nextFrames = await refreshFromOneMinute(key, current);
-      framesRef.current = nextFrames;
-      setFrames(nextFrames);
-      const live = generateSignal(nextFrames.c1, nextFrames.c5, nextFrames.c15, nextFrames.c1h, nextFrames.c4h, Date.now(), true);
-      publishSignal(live);
-      recalcResearch(nextFrames, live);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Historical sync failed");
-    } finally {
-      setLoading(false);
-    }
+      const next = await refreshFromOneMinute(apiKey, framesRef.current);
+      framesRef.current = next; setFrames(next); recalcAll(next, true); recalcResearch(next); setError(null);
+    } catch (e) { setError(e instanceof Error ? e.message : "Historical sync failed"); }
+    finally { setLoading(false); }
   }
 
   useEffect(() => {
     if (!apiKey) return;
-    framesRef.current = null;
-    signalRef.current = null;
-    pendingFlipRef.current = null;
-    setFrames(null);
-    setSignal(null);
-    setBacktest(null);
-    setSetupStats(null);
-    setTickCount(0);
+    setFrames(null); framesRef.current = null; setReady(false); setTickCount(0);
     void loadMarket(apiKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey]);
 
   useEffect(() => {
     if (!apiKey || !ready || !framesRef.current) return;
-
     return connectRealtimeXauUsd(apiKey, {
       onState: setStreamState,
-      onError: (message) => setError(message),
+      onError: setError,
       onTick: (tick) => {
         const current = framesRef.current;
         if (!current) return;
+        const prevMinute = current.c1.at(-1)?.timestamp;
+        const next = applyRealtimeTick(current, tick);
+        const nextMinute = next.c1.at(-1)?.timestamp;
+        const minuteRolled = Boolean(prevMinute && nextMinute && prevMinute !== nextMinute);
+        framesRef.current = next;
+        setFrames(next); // chart hot-path updates immediately on EVERY provider tick
+        setLastTickAt(Date.now()); setTickCount((n) => n + 1); setError(null);
 
-        const previousMinute = current.c1.at(-1)?.timestamp;
-        const nextFrames = applyRealtimeTick(current, tick);
-        const nextMinute = nextFrames.c1.at(-1)?.timestamp;
-        const minuteRolled = Boolean(previousMinute && nextMinute && previousMinute !== nextMinute);
-
-        framesRef.current = nextFrames;
-        setFrames(nextFrames);
-        setLastTickAt(Date.now());
-        setTickCount((n) => n + 1);
-        setError(null);
-
-        const now = performance.now();
-        if (now - lastSignalCalcRef.current >= 100) {
-          lastSignalCalcRef.current = now;
-          try {
-            const candidate = generateSignal(
-              nextFrames.c1,
-              nextFrames.c5,
-              nextFrames.c15,
-              nextFrames.c1h,
-              nextFrames.c4h,
-              tick.timestampMs,
-              true,
-            );
-            const existing = signalRef.current;
-
-            // Keep levels/confidence live when side is stable. Require a short confirmation before flipping side.
-            if (!existing || existing.signal === candidate.signal) {
-              pendingFlipRef.current = null;
-              publishSignal(candidate);
-            } else {
-              const pending = pendingFlipRef.current;
-              if (!pending || pending.side !== candidate.signal) {
-                pendingFlipRef.current = { side: candidate.signal, count: 1, since: Date.now(), signal: candidate };
-              } else {
-                const updated = { ...pending, count: pending.count + 1, signal: candidate };
-                pendingFlipRef.current = updated;
-                if (updated.count >= 2 && Date.now() - updated.since >= 250) {
-                  publishSignal(candidate);
-                  pendingFlipRef.current = null;
-                }
-              }
-            }
-          } catch {
-            // Keep the previous valid call while a just-opened candle lacks enough derived data.
-          }
+        const perf = performance.now();
+        if (perf - lastCalcRef.current >= 35) {
+          lastCalcRef.current = perf;
+          recalcAll(next, minuteRolled, tick.timestampMs);
         }
-
         if (minuteRolled) {
-          // Freeze one closed-candle call per minute for auditability, and refresh historical WR off closed bars only.
-          try {
-            const frozen = generateSignal(
-              nextFrames.c1,
-              nextFrames.c5,
-              nextFrames.c15,
-              nextFrames.c1h,
-              nextFrames.c4h,
-              tick.timestampMs,
-              false,
-            );
-            const id = `${frozen.timestamp}-${frozen.signal}`;
-            setHistory((previous) => {
-              if (previous.some((row) => row.id === id)) return previous;
-              const rows = [{ ...frozen, id, created_at: frozen.timestamp }, ...previous].slice(0, 180);
-              saveHistory(rows);
+          cacheMarketFrames(next); recalcResearch(next);
+          const frozen = scalpRef.current;
+          if (frozen) {
+            const row: FrozenRow = {
+              id: `${nextMinute}-${frozen.side}`,
+              at: nextMinute!, side: frozen.side, action: frozen.status,
+              entry: frozen.entry, stop: frozen.stop, tp1: frozen.tp1, tp2: frozen.tp2,
+              riskPct: frozen.risk.riskPct, confidence: frozen.confidence,
+            };
+            setHistory((old) => {
+              if (old.some((x) => x.id === row.id)) return old;
+              const rows = [row, ...old].slice(0, 120);
+              try { localStorage.setItem("xau_v5_history", JSON.stringify(rows)); } catch {}
               return rows;
             });
-            recalcResearch(nextFrames, signalRef.current ?? frozen);
-            cacheMarketFrames(nextFrames);
-          } catch {
-            // Research metrics remain at last completed snapshot if this minute is not evaluable yet.
           }
         }
       },
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiKey, ready]);
+  }, [apiKey, ready, account]);
 
-  useEffect(() => {
-    if (backtest && signal) setSetupStats(matchingSetupStats(backtest, signal));
-  }, [backtest, signal]);
-
-  const currentPrice = useMemo(() => frames?.c1.at(-1)?.close ?? signal?.entry_price ?? null, [frames, signal]);
-  const tone = signal?.signal === "BUY" ? "buy" : "sell";
-  const chartCandles = frames?.c1 ?? [];
-  const sampleQuality = (setupStats?.sampleSize ?? 0) >= 30 ? "GOOD SAMPLE" : (setupStats?.sampleSize ?? 0) >= 12 ? "EARLY SAMPLE" : "LOW SAMPLE";
-  const isLive = streamState === "LIVE";
-  const tickAge = lastTickAt ? Math.max(0, (Date.now() - lastTickAt) / 1000) : null;
+  const currentPrice = frames?.c1.at(-1)?.close ?? scalp?.entry ?? null;
+  const tickAge = lastTickAt ? Math.max(0, (clock - lastTickAt) / 1000) : null;
+  const isSaturday = new Date(clock).getDay() === 6;
+  const stale = tickAge != null && tickAge > 3;
+  const sampleQuality = (setupStats?.sampleSize ?? 0) >= 40 ? "GOOD SAMPLE" : (setupStats?.sampleSize ?? 0) >= 15 ? "EARLY SAMPLE" : "LOW SAMPLE";
 
   function connectKey() {
-    const key = draftKey.trim();
-    if (!key) return;
-    saveApiKey(key);
-    setApiKey(key);
+    const key = draftKey.trim(); if (!key) return;
+    saveApiKey(key); setApiKey(key);
   }
-
   function disconnectKey() {
-    clearApiKey();
-    setApiKey("");
-    setDraftKey("");
-    setReady(false);
-    setStreamState("CLOSED");
-    setSignal(null);
-    signalRef.current = null;
-    setFrames(null);
-    framesRef.current = null;
-    setBacktest(null);
-    setSetupStats(null);
-    setLastTickAt(null);
+    clearApiKey(); setApiKey(""); setDraftKey(""); setReady(false); setFrames(null); framesRef.current = null; setScalp(null); setDaily(null); setPredictions([]);
+  }
+  function updateAccount<K extends keyof AccountConfig>(key: K, value: number) {
+    setAccount((a) => ({ ...a, [key]: Number.isFinite(value) ? value : a[key] }));
   }
 
   return (
     <main className="shell">
       <header className="topbar">
-        <div>
-          <div className="eyebrow">RASYID SIGNAL CALL · REALTIME SCALPING V4</div>
-          <h1>XAU/USD</h1>
-          <div className="subline">4H/1H context → 15M setup → 5M + 1M micro execution · realtime WebSocket</div>
-        </div>
-        <div className={`status ${isLive ? "online" : "offline"}`}>
-          <span /> {apiKey ? `WS ${streamState}` : "API KEY REQUIRED"}
-        </div>
+        <div><div className="eyebrow">RASYID SIGNAL CALL · XAUUSD V5</div><h1>XAU/USD</h1><div className="subline">Daily setup dipisah dari micro scalp · 5M/1M execution · 2-position risk gate</div></div>
+        <div className={`status ${streamState === "LIVE" && !stale ? "online" : "offline"}`}><span />{apiKey ? `WS ${streamState}${stale ? " · STALE" : ""}` : "API KEY REQUIRED"}</div>
       </header>
 
-      {!apiKey && (
-        <section className="panel connect-panel">
-          <div className="panel-head"><span>CONNECT MARKET DATA</span><span>Twelve Data</span></div>
-          <p>Masukkan API key Twelve Data. Untuk versi GitHub Pages, key tersimpan hanya di browser ini tetapi tetap dapat terlihat oleh JavaScript/network browser; gunakan hanya untuk dashboard personal.</p>
-          <div className="connect-row">
-            <input value={draftKey} onChange={(e) => setDraftKey(e.target.value)} placeholder="Paste Twelve Data API key" type="password" />
-            <button onClick={connectKey}>CONNECT</button>
-          </div>
-        </section>
-      )}
+      {isSaturday && <div className="weekend-banner"><strong>SATURDAY MODE</strong><span>Standard XAU/USD umumnya tutup Sabtu. Dashboard memakai Friday-close data untuk preparation; live entry hanya valid bila broker/feed benar-benar mengirim tick.</span></div>}
 
-      {apiKey && (
-        <div className="toolbar">
-          <span>{lastTickAt ? `Last tick ${new Date(lastTickAt).toLocaleTimeString()} · ${tickAge?.toFixed(1)}s ago` : loading ? "Loading historical data..." : "Waiting for first live tick..."}</span>
-          <span className="usage-note">WebSocket tick → chart immediately · signal recalc ≤100ms · REST only for history · ticks {tickCount}</span>
-          <div>
-            <button onClick={() => void syncHistory()} disabled={loading || !frames}>{loading ? "SYNCING..." : "SYNC HISTORY"}</button>
-            <button onClick={disconnectKey}>CHANGE API KEY</button>
-          </div>
-        </div>
-      )}
+      {!apiKey && <section className="panel connect-panel"><div className="panel-head"><span>CONNECT MARKET DATA</span><span>Twelve Data</span></div><p>API key disimpan lokal di browser untuk dashboard personal.</p><div className="connect-row"><input type="password" value={draftKey} onChange={(e) => setDraftKey(e.target.value)} placeholder="Paste Twelve Data API key"/><button onClick={connectKey}>CONNECT</button></div></section>}
 
+      {apiKey && <div className="toolbar"><span>{lastTickAt ? `Last tick ${new Date(lastTickAt).toLocaleTimeString()} · ${tickAge?.toFixed(1)}s ago` : loading ? "Loading history..." : "Waiting tick..."}</span><span className="usage-note">Chart update = every received tick · analysis gate ≤35ms after tick · ticks {tickCount}</span><div><button onClick={() => void syncHistory()} disabled={loading}>{loading ? "SYNCING..." : "SYNC HISTORY"}</button><button onClick={disconnectKey}>CHANGE API KEY</button></div></div>}
       {error && <div className="error">{error}</div>}
 
-      <section className="hero-grid">
-        <article className="panel market-panel">
-          <div className="panel-head"><span>Gold Spot / U.S. Dollar</span><span>{isLive ? "● LIVE TICK · 1M" : "1M EXECUTION CHART"}</span></div>
-          <div className="market-price">{price(currentPrice)} <small className={`live-tag ${isLive ? "on" : ""}`}>{isLive ? "STREAMING" : streamState}</small></div>
-          <CandleChart candles={chartCandles} />
-        </article>
+      <section className="hero-grid v5-hero">
+        <article className="panel market-panel"><div className="panel-head"><span>Gold Spot / U.S. Dollar</span><span>● LIVE TICK · 1M</span></div><div className="market-price">{px(currentPrice)} <small className={`live-tag ${streamState === "LIVE" && !stale ? "on" : ""}`}>{streamState === "LIVE" && !stale ? "STREAMING" : stale ? "STALE FEED" : streamState}</small></div><CandleChart candles={frames?.c1 ?? []}/></article>
+        <div className="side-stack"><SetupCard title="SCALPING SETUP · 5M + 1M" setup={scalp}/><SetupCard title="DAILY SETUP · 4H + 1H + 15M" setup={daily}/></div>
+      </section>
 
-        <aside className={`panel signal-panel ${tone}`}>
-          <div className="panel-head"><span>MICRO SCALP CALL</span><span>{signal?.status ?? "WAITING"}</span></div>
-          <div className="signal-name">{signal?.signal ?? "—"}</div>
-          <div className="confidence"><span>{signal?.confidence ?? 0}</span><small>/100 micro confluence</small></div>
-          <div className={`execution-box ${signal?.execution_mode === "ENTER_NOW" ? "ready" : "wait"}`}>
-            <small>EXECUTION</small><strong>{signal?.execution_mode === "ENTER_NOW" ? "ENTER NOW" : "WAIT PULLBACK"}</strong>
-            <span>Setup grade {signal?.setup_grade ?? "—"} · 5M/1M weighted 80%</span>
-          </div>
-          <div className="winrate-block">
-            <div><small>HISTORICAL SETUP WR</small><strong>{percent(setupStats?.winRate)}</strong></div>
-            <div><small>SAMPLE</small><strong>N={setupStats?.sampleSize ?? 0}</strong></div>
-            <div className="sample-badge">{sampleQuality} · CLOSED-CANDLE TEST</div>
-          </div>
-          <div className="levels">
-            <div><small>SUGGESTED ENTRY</small><strong>{price(signal?.entry_price)}</strong></div>
-            <div><small>STOP LOSS</small><strong>{price(signal?.stop_loss)}</strong></div>
-            <div><small>TP1 · ~1.6R</small><strong>{price(signal?.take_profit_1)}</strong></div>
-            <div><small>TP2 · structure / ~2.2R</small><strong>{price(signal?.take_profit_2)}</strong></div>
-          </div>
-          <div className="rr"><span>R:R</span><strong>{signal?.risk_reward ? `1:${signal.risk_reward}` : "—"}</strong></div>
-          <div className="regime"><small>5M MARKET REGIME</small><strong>{signal?.market_regime?.replaceAll("_", " ") ?? "—"}</strong><small>Risk distance {price(signal?.risk_distance)} · live {price(signal?.current_price)}</small></div>
-        </aside>
+      <section className="panel account-panel">
+        <div className="panel-head"><span>ACCOUNT RISK GATE</span><span>DEFAULT: Rp1.000.000 · 2 × 0.01 LOT</span></div>
+        <div className="account-grid">
+          <label>Balance IDR<input type="number" value={account.balanceIdr} onChange={(e) => updateAccount("balanceIdr", Number(e.target.value))}/></label>
+          <label>Positions<input type="number" min="1" step="1" value={account.positions} onChange={(e) => updateAccount("positions", Number(e.target.value))}/></label>
+          <label>Lot / position<input type="number" step="0.001" value={account.lotPerPosition} onChange={(e) => updateAccount("lotPerPosition", Number(e.target.value))}/></label>
+          <label>Contract oz / 1 lot<input type="number" value={account.contractSizeOz} onChange={(e) => updateAccount("contractSizeOz", Number(e.target.value))}/></label>
+          <label>USD/IDR estimate<input type="number" value={account.usdIdr} onChange={(e) => updateAccount("usdIdr", Number(e.target.value))}/></label>
+        </div>
+        <div className="risk-warning">Perhitungan default mengasumsikan 1 lot XAUUSD = 100 oz. Cek contract specification broker. R:R bagus tidak menghapus risiko nominal: kalau SL struktural membuat 2×0.01 melebihi budget, dashboard akan bilang NO ENTRY.</div>
+      </section>
+
+      <section className="panel prediction-panel">
+        <div className="panel-head"><span>PREDICTIVE POSITION</span><span>SCENARIO BIAS · NOT GUARANTEED PROBABILITY</span></div>
+        <div className="prediction-grid">{predictions.length ? predictions.map((p) => <PredictionCard key={p.minutes} row={p}/>) : <div className="empty">Waiting for market data...</div>}</div>
       </section>
 
       <section className="stats-grid">
-        <article className="panel metric-card">
-          <div className="panel-head"><span>RECENT STRATEGY BACKTEST</span><span>CLOSED BARS ONLY</span></div>
-          <div className="metric-main">{percent(backtest?.winRate)}</div>
-          <div className="metric-caption">Executable entries only · TP1 before SL · max hold 15M · N={backtest?.sampleSize ?? 0}</div>
-          <div className="mini-metrics">
-            <span>WINS <strong>{backtest?.wins ?? 0}</strong></span>
-            <span>LOSSES <strong>{backtest?.losses ?? 0}</strong></span>
-            <span>PF <strong>{backtest?.profitFactor ?? "—"}</strong></span>
-          </div>
-        </article>
-
-        <article className="panel metric-card">
-          <div className="panel-head"><span>CURRENT SETUP MATCH</span><span>{signal?.signal ?? "—"}</span></div>
-          <div className="metric-main">{percent(setupStats?.winRate)}</div>
-          <div className="metric-caption">Similar historical calls · N={setupStats?.sampleSize ?? 0}</div>
-          <div className="mini-metrics">
-            <span>WINS <strong>{setupStats?.wins ?? 0}</strong></span>
-            <span>LOSSES <strong>{setupStats?.losses ?? 0}</strong></span>
-            <span>STATUS <strong>{sampleQuality}</strong></span>
-          </div>
-        </article>
+        <article className="panel metric-card"><div className="panel-head"><span>SCALP HISTORICAL WR</span><span>CLOSED BARS</span></div><div className="metric-main">{pct(setupStats?.winRate)}</div><div className="metric-caption">Similar V4/V5 core micro calls · TP1 before SL · N={setupStats?.sampleSize ?? 0} · {sampleQuality}</div><div className="mini-metrics"><span>WINS <strong>{setupStats?.wins ?? 0}</strong></span><span>LOSSES <strong>{setupStats?.losses ?? 0}</strong></span><span>PF <strong>{setupStats?.profitFactor ?? "—"}</strong></span></div></article>
+        <article className="panel metric-card"><div className="panel-head"><span>RECENT STRATEGY</span><span>EXECUTABLE ENTRIES</span></div><div className="metric-main">{pct(backtest?.winRate)}</div><div className="metric-caption">Recent closed-bar backtest · N={backtest?.sampleSize ?? 0}</div><div className="mini-metrics"><span>WINS <strong>{backtest?.wins ?? 0}</strong></span><span>LOSSES <strong>{backtest?.losses ?? 0}</strong></span><span>AVG RR <strong>{backtest?.averageRiskReward ?? "—"}</strong></span></div></article>
       </section>
 
       <section className="lower-grid">
-        <article className="panel">
-          <div className="panel-head"><span>LIVE TOP-DOWN ANALYSIS</span><span>HIGH → LOW</span></div>
-          <div className="timeframes">
-            {signal?.timeframe_analysis?.map((item) => (
-              <div className="tf-row" key={item.timeframe}>
-                <strong>{item.timeframe.toUpperCase()}</strong>
-                <span className={`pill ${item.bias.toLowerCase()}`}>{item.bias}</span>
-                <span>{item.score}/100</span>
-                <small>Net {item.directionalScore > 0 ? "+" : ""}{item.directionalScore} · RSI {item.rsi} · ADX {item.adx}</small>
-              </div>
-            ))}
-          </div>
-        </article>
-
-        <article className="panel">
-          <div className="panel-head"><span>WHY THIS CALL?</span><span>{signal?.strategy_version ?? "v—"}</span></div>
-          <ul className="reasons">{(signal?.reasons ?? ["Waiting for market data..."]).map((reason) => <li key={reason}>{reason}</li>)}</ul>
-          <div className="research-note">
-            V4 memprioritaskan 5M + 1M untuk entry. Higher timeframe hanya konteks. Win rate historical hanya menghitung setup yang engine tandai ENTER NOW pada closed candles. Stop ditempatkan di luar micro swing/liquidity sweep dengan ATR buffer; ini mengurangi stop yang terlalu ketat tetapi tidak menjamin terhindar dari stop-out.
-          </div>
-        </article>
+        <article className="panel"><div className="panel-head"><span>TOP-DOWN MARKET MAP</span><span>4H → 1M</span></div><div className="timeframes">{scalp?.timeframeAnalysis.map((row) => <div className="tf-row" key={row.timeframe}><strong>{row.timeframe.toUpperCase()}</strong><span className={`pill ${row.bias.toLowerCase()}`}>{row.bias}</span><span>{row.score}/100</span><small>Net {row.directionalScore > 0 ? "+" : ""}{row.directionalScore} · RSI {row.rsi} · ADX {row.adx}</small></div>)}</div></article>
+        <article className="panel"><div className="panel-head"><span>WHY / WHY NOT ENTRY?</span><span>V5</span></div><ul className="reasons">{(scalp?.reasons ?? ["Waiting for data..."]).map((r) => <li key={r}>{r}</li>)}</ul><div className="research-note">V5 sengaja membedakan directional bias dan izin entry. BUY/SELL tidak otomatis berarti entry sekarang. Risk gate, micro alignment, liquidity space, dan R:R harus lolos dulu.</div></article>
       </section>
 
-      <section className="panel history">
-        <div className="panel-head"><span>FROZEN 1M CALL HISTORY</span><span>V4 snapshots · stored in this browser</span></div>
-        {history.length === 0 ? <div className="empty">Belum ada closed-minute call tersimpan.</div> : (
-          <div className="table-wrap"><table><thead><tr><th>Time</th><th>Call</th><th>Confluence</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Regime</th></tr></thead><tbody>
-            {history.map((row) => <tr key={row.id}>
-              <td>{new Date(row.created_at).toLocaleString()}</td>
-              <td><span className={`pill ${row.signal.toLowerCase()}`}>{row.signal}</span></td>
-              <td>{row.confidence}</td><td>{price(row.entry_price)}</td><td>{price(row.stop_loss)}</td><td>{price(row.take_profit_1)}</td><td>{price(row.take_profit_2)}</td><td>{row.market_regime.replaceAll("_", " ")}</td>
-            </tr>)}
-          </tbody></table></div>
-        )}
-      </section>
+      <section className="panel history"><div className="panel-head"><span>FROZEN 1M DECISIONS</span><span>browser-local</span></div>{!history.length ? <div className="empty">Belum ada minute snapshot.</div> : <div className="table-wrap"><table><thead><tr><th>Time</th><th>Side</th><th>Action</th><th>Conf</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Risk%</th></tr></thead><tbody>{history.map((r) => <tr key={r.id}><td>{new Date(r.at).toLocaleString()}</td><td><span className={`pill ${r.side.toLowerCase()}`}>{r.side}</span></td><td>{r.action}</td><td>{r.confidence}</td><td>{px(r.entry)}</td><td>{px(r.stop)}</td><td>{px(r.tp1)}</td><td>{px(r.tp2)}</td><td>{r.riskPct.toFixed(1)}%</td></tr>)}</tbody></table></div>}</section>
     </main>
   );
 }

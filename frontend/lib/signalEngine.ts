@@ -400,7 +400,7 @@ export function generateSignal(
   ];
   const [a4h, a1h, a15, a5, a1] = analyses;
 
-  // Scalping V4: 80% of directional decision comes from 1M/5M/15M. Higher TFs are context only.
+  // Scalping V5 core: 80% of directional decision comes from 1M/5M/15M. Higher TFs are context only.
   const weights = [0.03, 0.05, 0.12, 0.38, 0.42];
   const net = analyses.reduce((sum, a, i) => sum + a.directionalScore * weights[i], 0);
   const side: "BUY" | "SELL" = net >= 0 ? "BUY" : "SELL";
@@ -454,7 +454,7 @@ export function generateSignal(
     reasons,
     timeframe_analysis: analyses,
     strategy_name: "xau_microstructure_scalper",
-    strategy_version: liveIntrabar ? "3.0.0-live" : "3.0.0",
+    strategy_version: liveIntrabar ? "5.0.0-live" : "5.0.0",
   };
 }
 

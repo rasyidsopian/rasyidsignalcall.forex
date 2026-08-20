@@ -1,10 +1,9 @@
-# GitHub Pages deployment
+# GitHub-only deploy
 
-1. Open the GitHub repository.
-2. Choose **Add file → Upload files**.
-3. Upload the CONTENTS of this folder so `frontend/` and `.github/` remain at repository root.
-4. Commit directly to `main`.
-5. GitHub Actions automatically runs `Deploy GitHub Pages`.
-6. Hard refresh the live site after the deployment turns green.
+1. Upload the **contents** of this folder to the repository root.
+2. Keep `.github/workflows/pages.yml`.
+3. Commit to `main`.
+4. GitHub Actions builds `frontend/` and publishes `frontend/out`.
+5. Hard-refresh the live site after the workflow turns green.
 
-V4 intentionally uses no Railway/Render backend. Twelve Data REST initializes historical candles and WebSocket streams live XAU/USD ticks directly to the browser.
+V5 requires no Railway/Render backend. Twelve Data REST is used for historical initialization and WebSocket for live XAU/USD ticks.
