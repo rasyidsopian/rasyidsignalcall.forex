@@ -15,8 +15,8 @@ import {
   type MarketFrames,
   type StreamState,
 } from "../lib/marketData";
-import { backtestStrategy, generateSignal, matchingSetupStats } from "../lib/signalEngine";
 import {
+  backtestTightScalp,
   buildDailySetup,
   buildPredictions,
   buildScalpingSetup,
@@ -24,7 +24,7 @@ import {
   type AccountConfig,
   type HorizonPrediction,
   type TradeSetup,
-} from "../lib/strategyV5";
+} from "../lib/strategyV6";
 import type { BacktestStats } from "../types";
 
 type FrozenRow = {
@@ -46,12 +46,12 @@ const pct = (v: number | null | undefined) => v == null ? "—" : `${v.toFixed(1
 
 function loadAccount(): AccountConfig {
   try {
-    const saved = JSON.parse(localStorage.getItem("xau_v5_account") ?? "null");
+    const saved = JSON.parse(localStorage.getItem("xau_v6_account") ?? "null");
     return saved ? { ...DEFAULT_ACCOUNT, ...saved } : DEFAULT_ACCOUNT;
   } catch { return DEFAULT_ACCOUNT; }
 }
 function loadHistory(): FrozenRow[] {
-  try { return JSON.parse(localStorage.getItem("xau_v5_history") ?? "[]"); } catch { return []; }
+  try { return JSON.parse(localStorage.getItem("xau_v6_history") ?? "[]"); } catch { return []; }
 }
 
 function RiskLine({ setup }: { setup: TradeSetup | null }) {
@@ -68,19 +68,26 @@ function RiskLine({ setup }: { setup: TradeSetup | null }) {
   );
 }
 
-function SetupCard({ title, setup, showRisk = true }: { title: string; setup: TradeSetup | null; showRisk?: boolean }) {
+function SetupCard({ title, setup, showRisk = true, tight = true }: { title: string; setup: TradeSetup | null; showRisk?: boolean; tight?: boolean }) {
   const tone = setup?.side.toLowerCase() ?? "neutral";
   return (
     <article className={`panel setup-card ${tone}`}>
       <div className="panel-head"><span>{title}</span><span>{setup?.status ?? "WAITING"}</span></div>
       <div className="setup-call"><strong>{setup?.side ?? "—"}</strong><span>{setup?.confidence ?? 0}/100 confluence</span></div>
       {showRisk && <RiskLine setup={setup} />}
-      <div className="levels compact">
-        <div><small>ENTRY</small><strong>{px(setup?.entry)}</strong></div>
-        <div><small>STOP</small><strong>{px(setup?.stop)}</strong></div>
+      {tight ? <div className="levels compact">
+        <div><small>ENTRY / PLAN</small><strong>{px(setup?.entry)}</strong></div>
+        <div><small>ENTRY ZONE</small><strong>{setup ? `${px(setup.entryZoneLow)} – ${px(setup.entryZoneHigh)}` : "—"}</strong></div>
+        <div><small>STOP · {setup?.stopPips?.toFixed(1) ?? "—"} PIPS</small><strong>{px(setup?.stop)}</strong></div>
+        <div><small>MAX STOP</small><strong>{setup?.maxStopPips?.toFixed(1) ?? "—"} pips</strong></div>
         <div><small>POS #1 TP · {setup?.rr1?.toFixed(1) ?? "—"}R</small><strong>{px(setup?.tp1)}</strong></div>
         <div><small>POS #2 TP · {setup?.rr2?.toFixed(1) ?? "—"}R</small><strong>{px(setup?.tp2)}</strong></div>
-      </div>
+      </div> : <div className="levels compact">
+        <div><small>ENTRY</small><strong>{px(setup?.entry)}</strong></div>
+        <div><small>STOP</small><strong>{px(setup?.stop)}</strong></div>
+        <div><small>TP1 · {setup?.rr1?.toFixed(1) ?? "—"}R</small><strong>{px(setup?.tp1)}</strong></div>
+        <div><small>TP2 · {setup?.rr2?.toFixed(1) ?? "—"}R</small><strong>{px(setup?.tp2)}</strong></div>
+      </div>}
       <div className="be-note"><strong>BE rule</strong><span>{setup?.beRule ?? "—"}</span></div>
     </article>
   );
@@ -91,8 +98,10 @@ function PredictionCard({ row }: { row: HorizonPrediction }) {
     <div className={`prediction ${row.bias.toLowerCase()}`}>
       <div><strong>{row.minutes} MIN</strong><span className={`pill ${row.bias.toLowerCase()}`}>{row.bias}</span></div>
       <b>{row.edgeScore}/100 edge</b>
-      <small>Projected {px(row.projectedLow)} – {px(row.projectedHigh)}</small>
-      <small>{row.alignment} with scalp call</small>
+      <strong className="prediction-action">{row.action}</strong>
+      <small>Entry zone {px(row.entryZoneLow)} – {px(row.entryZoneHigh)}</small>
+      <small>SL {px(row.stop)} · TP1 {px(row.tp1)} · TP2 {px(row.tp2)} · R:R 1:{row.rr.toFixed(1)}</small>
+      <small>Projected {px(row.projectedLow)} – {px(row.projectedHigh)} · {row.alignment}</small>
     </div>
   );
 }
@@ -117,7 +126,8 @@ export default function Dashboard() {
   const [tickCount, setTickCount] = useState(0);
   const [lastTickAt, setLastTickAt] = useState<number | null>(null);
   const [clock, setClock] = useState(Date.now());
-  const lastCalcRef = useRef(0);
+  const [engineLatencyMs, setEngineLatencyMs] = useState<number | null>(null);
+  const [providerTickMs, setProviderTickMs] = useState<number | null>(null);
   const lastDailyCalcRef = useRef(0);
 
   useEffect(() => {
@@ -129,7 +139,7 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    try { localStorage.setItem("xau_v5_account", JSON.stringify(account)); } catch {}
+    try { localStorage.setItem("xau_v6_account", JSON.stringify(account)); } catch {}
     const f = framesRef.current;
     if (f) recalcAll(f, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -137,10 +147,19 @@ export default function Dashboard() {
 
   function recalcResearch(next: MarketFrames) {
     try {
-      const bt = backtestStrategy(next.c1, next.c5, next.c15, next.c1h, next.c4h, 180);
+      const bt = backtestTightScalp(next, account, 120);
       setBacktest(bt);
-      const core = generateSignal(next.c1, next.c5, next.c15, next.c1h, next.c4h, Date.now(), true);
-      setSetupStats(matchingSetupStats(bt, core));
+      const recent = bt.trades.slice(-40);
+      const wins = recent.filter((t) => t.result === "WIN").length;
+      const losses = recent.filter((t) => t.result === "LOSS").length;
+      const sampleSize = wins + losses;
+      setSetupStats({
+        winRate: sampleSize ? Math.round(wins / sampleSize * 1000) / 10 : null,
+        wins, losses, sampleSize,
+        profitFactor: losses ? Math.round((wins * 1.8 / losses) * 100) / 100 : wins ? 99 : null,
+        averageRiskReward: recent.length ? Math.round(recent.reduce((s, t) => s + t.riskReward, 0) / recent.length * 100) / 100 : null,
+        trades: recent,
+      });
     } catch {}
   }
 
@@ -201,11 +220,10 @@ export default function Dashboard() {
         setFrames(next); // chart hot-path updates immediately on EVERY provider tick
         setLastTickAt(Date.now()); setTickCount((n) => n + 1); setError(null);
 
-        const perf = performance.now();
-        if (perf - lastCalcRef.current >= 35) {
-          lastCalcRef.current = perf;
-          recalcAll(next, minuteRolled, tick.timestampMs);
-        }
+        const perf0 = performance.now();
+        recalcAll(next, minuteRolled, tick.timestampMs); // V6: no 35ms throttle; every received provider tick is analyzed.
+        setEngineLatencyMs(Math.round((performance.now() - perf0) * 10) / 10);
+        setProviderTickMs(tick.timestampMs);
         if (minuteRolled) {
           cacheMarketFrames(next); recalcResearch(next);
           const frozen = scalpRef.current;
@@ -219,7 +237,7 @@ export default function Dashboard() {
             setHistory((old) => {
               if (old.some((x) => x.id === row.id)) return old;
               const rows = [row, ...old].slice(0, 120);
-              try { localStorage.setItem("xau_v5_history", JSON.stringify(rows)); } catch {}
+              try { localStorage.setItem("xau_v6_history", JSON.stringify(rows)); } catch {}
               return rows;
             });
           }
@@ -231,8 +249,10 @@ export default function Dashboard() {
 
   const currentPrice = frames?.c1.at(-1)?.close ?? scalp?.entry ?? null;
   const tickAge = lastTickAt ? Math.max(0, (clock - lastTickAt) / 1000) : null;
-  const isSaturday = new Date(clock).getDay() === 6;
+  const isSaturday = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Jakarta", weekday: "short" }).format(new Date(clock)) === "Sat";
   const stale = tickAge != null && tickAge > 3;
+  const providerAgeMs = providerTickMs ? Math.max(0, Date.now() - providerTickMs) : null;
+  const formatWib = (ms: number) => new Intl.DateTimeFormat("id-ID", { timeZone: "Asia/Jakarta", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(ms)) + " WIB";
   const sampleQuality = (setupStats?.sampleSize ?? 0) >= 40 ? "GOOD SAMPLE" : (setupStats?.sampleSize ?? 0) >= 15 ? "EARLY SAMPLE" : "LOW SAMPLE";
 
   function connectKey() {
@@ -249,7 +269,7 @@ export default function Dashboard() {
   return (
     <main className="shell">
       <header className="topbar">
-        <div><div className="eyebrow">RASYID SIGNAL CALL · XAUUSD V5</div><h1>XAU/USD</h1><div className="subline">Daily setup dipisah dari micro scalp · 5M/1M execution · 2-position risk gate</div></div>
+        <div><div className="eyebrow">RASYID SIGNAL CALL · XAUUSD V6 TIGHT SCALP</div><h1>XAU/USD</h1><div className="subline">Predictive micro-entry · max 25-pip SL · 1M/5M execution · WIB realtime clock</div></div>
         <div className={`status ${streamState === "LIVE" && !stale ? "online" : "offline"}`}><span />{apiKey ? `WS ${streamState}${stale ? " · STALE" : ""}` : "API KEY REQUIRED"}</div>
       </header>
 
@@ -257,42 +277,45 @@ export default function Dashboard() {
 
       {!apiKey && <section className="panel connect-panel"><div className="panel-head"><span>CONNECT MARKET DATA</span><span>Twelve Data</span></div><p>API key disimpan lokal di browser untuk dashboard personal.</p><div className="connect-row"><input type="password" value={draftKey} onChange={(e) => setDraftKey(e.target.value)} placeholder="Paste Twelve Data API key"/><button onClick={connectKey}>CONNECT</button></div></section>}
 
-      {apiKey && <div className="toolbar"><span>{lastTickAt ? `Last tick ${new Date(lastTickAt).toLocaleTimeString()} · ${tickAge?.toFixed(1)}s ago` : loading ? "Loading history..." : "Waiting tick..."}</span><span className="usage-note">Chart update = every received tick · analysis gate ≤35ms after tick · ticks {tickCount}</span><div><button onClick={() => void syncHistory()} disabled={loading}>{loading ? "SYNCING..." : "SYNC HISTORY"}</button><button onClick={disconnectKey}>CHANGE API KEY</button></div></div>}
+      {apiKey && <div className="toolbar"><span>{lastTickAt ? `Last tick ${formatWib(lastTickAt)} · ${tickAge?.toFixed(1)}s ago` : loading ? "Loading history..." : "Waiting tick..."}</span><span className="usage-note">Every provider tick → chart + signal · engine {engineLatencyMs == null ? "—" : `${engineLatencyMs.toFixed(1)}ms`} · feed age {providerAgeMs == null ? "—" : `${providerAgeMs}ms`} · ticks {tickCount}</span><div><button onClick={() => void syncHistory()} disabled={loading}>{loading ? "SYNCING..." : "SYNC HISTORY"}</button><button onClick={disconnectKey}>CHANGE API KEY</button></div></div>}
       {error && <div className="error">{error}</div>}
 
       <section className="hero-grid v5-hero">
-        <article className="panel market-panel"><div className="panel-head"><span>Gold Spot / U.S. Dollar</span><span>● LIVE TICK · 1M</span></div><div className="market-price">{px(currentPrice)} <small className={`live-tag ${streamState === "LIVE" && !stale ? "on" : ""}`}>{streamState === "LIVE" && !stale ? "STREAMING" : stale ? "STALE FEED" : streamState}</small></div><CandleChart candles={frames?.c1 ?? []}/></article>
-        <div className="side-stack"><SetupCard title="SCALPING SETUP · 5M + 1M" setup={scalp}/><SetupCard title="DAILY SETUP · 4H + 1H + 15M" setup={daily}/></div>
+        <article className="panel market-panel"><div className="panel-head"><span>Gold Spot / U.S. Dollar</span><span>● LIVE TICK · 1M · WIB</span></div><div className="market-price">{px(currentPrice)} <small className={`live-tag ${streamState === "LIVE" && !stale ? "on" : ""}`}>{streamState === "LIVE" && !stale ? "STREAMING" : stale ? "STALE FEED" : streamState}</small></div><CandleChart candles={frames?.c1 ?? []}/></article>
+        <div className="side-stack"><SetupCard title="PREDICTIVE SCALP · 1M + 5M" setup={scalp}/><SetupCard title="DAILY SETUP · 4H + 1H + 15M" setup={daily} tight={false}/></div>
       </section>
 
       <section className="panel account-panel">
-        <div className="panel-head"><span>ACCOUNT RISK GATE</span><span>DEFAULT: Rp1.000.000 · 2 × 0.01 LOT</span></div>
+        <div className="panel-head"><span>ACCOUNT + TIGHT STOP ENGINE</span><span>DEFAULT: Rp1.000.000 · 2 × 0.01 LOT · MAX 25 PIPS</span></div>
         <div className="account-grid">
           <label>Balance IDR<input type="number" value={account.balanceIdr} onChange={(e) => updateAccount("balanceIdr", Number(e.target.value))}/></label>
           <label>Positions<input type="number" min="1" step="1" value={account.positions} onChange={(e) => updateAccount("positions", Number(e.target.value))}/></label>
           <label>Lot / position<input type="number" step="0.001" value={account.lotPerPosition} onChange={(e) => updateAccount("lotPerPosition", Number(e.target.value))}/></label>
           <label>Contract oz / 1 lot<input type="number" value={account.contractSizeOz} onChange={(e) => updateAccount("contractSizeOz", Number(e.target.value))}/></label>
           <label>USD/IDR estimate<input type="number" value={account.usdIdr} onChange={(e) => updateAccount("usdIdr", Number(e.target.value))}/></label>
+          <label>Broker pip size<input type="number" step="0.01" value={account.pipSize} onChange={(e) => updateAccount("pipSize", Number(e.target.value))}/></label>
+          <label>Max scalp SL (pips)<input type="number" step="1" value={account.maxScalpStopPips} onChange={(e) => updateAccount("maxScalpStopPips", Number(e.target.value))}/></label>
+          <label>Target risk % total<input type="number" step="0.1" value={account.scalpTargetRiskPct} onChange={(e) => updateAccount("scalpTargetRiskPct", Number(e.target.value))}/></label>
         </div>
-        <div className="risk-warning">Perhitungan default mengasumsikan 1 lot XAUUSD = 100 oz. Cek contract specification broker. R:R bagus tidak menghapus risiko nominal: kalau SL struktural membuat 2×0.01 melebihi budget, dashboard akan bilang NO ENTRY.</div>
+        <div className="risk-warning">V6 menggeser predictive ENTRY ZONE mendekati micro structure agar SL muat di saldo + cap 25 pips. Default pip size 0.01 mengikuti quote 2-desimal; ubah kalau definisi pip broker lo berbeda. Engine tidak menjanjikan 25 pips selalu aman dari noise/spread.</div>
       </section>
 
       <section className="panel prediction-panel">
-        <div className="panel-head"><span>PREDICTIVE POSITION</span><span>SCENARIO BIAS · NOT GUARANTEED PROBABILITY</span></div>
+        <div className="panel-head"><span>PREDICTIVE CALL · 1 / 5 / 10 MIN</span><span>ENTRY ZONE + MAX-SL PLAN · NOT GUARANTEED PROBABILITY</span></div>
         <div className="prediction-grid">{predictions.length ? predictions.map((p) => <PredictionCard key={p.minutes} row={p}/>) : <div className="empty">Waiting for market data...</div>}</div>
       </section>
 
       <section className="stats-grid">
-        <article className="panel metric-card"><div className="panel-head"><span>SCALP HISTORICAL WR</span><span>CLOSED BARS</span></div><div className="metric-main">{pct(setupStats?.winRate)}</div><div className="metric-caption">Similar V4/V5 core micro calls · TP1 before SL · N={setupStats?.sampleSize ?? 0} · {sampleQuality}</div><div className="mini-metrics"><span>WINS <strong>{setupStats?.wins ?? 0}</strong></span><span>LOSSES <strong>{setupStats?.losses ?? 0}</strong></span><span>PF <strong>{setupStats?.profitFactor ?? "—"}</strong></span></div></article>
-        <article className="panel metric-card"><div className="panel-head"><span>RECENT STRATEGY</span><span>EXECUTABLE ENTRIES</span></div><div className="metric-main">{pct(backtest?.winRate)}</div><div className="metric-caption">Recent closed-bar backtest · N={backtest?.sampleSize ?? 0}</div><div className="mini-metrics"><span>WINS <strong>{backtest?.wins ?? 0}</strong></span><span>LOSSES <strong>{backtest?.losses ?? 0}</strong></span><span>AVG RR <strong>{backtest?.averageRiskReward ?? "—"}</strong></span></div></article>
+        <article className="panel metric-card"><div className="panel-head"><span>RECENT 40 V6 CALLS</span><span>≤25-PIP EXECUTABLE CALLS</span></div><div className="metric-main">{pct(setupStats?.winRate)}</div><div className="metric-caption">Recent tight-SL sample · TP1 1.8R before SL · N={setupStats?.sampleSize ?? 0} · {sampleQuality}</div><div className="mini-metrics"><span>WINS <strong>{setupStats?.wins ?? 0}</strong></span><span>LOSSES <strong>{setupStats?.losses ?? 0}</strong></span><span>PF <strong>{setupStats?.profitFactor ?? "—"}</strong></span></div></article>
+        <article className="panel metric-card"><div className="panel-head"><span>FULL V6 BACKTEST</span><span>TIGHT STOP SAMPLE</span></div><div className="metric-main">{pct(backtest?.winRate)}</div><div className="metric-caption">Full V6 closed-bar backtest · N={backtest?.sampleSize ?? 0}</div><div className="mini-metrics"><span>WINS <strong>{backtest?.wins ?? 0}</strong></span><span>LOSSES <strong>{backtest?.losses ?? 0}</strong></span><span>AVG RR <strong>{backtest?.averageRiskReward ?? "—"}</strong></span></div></article>
       </section>
 
       <section className="lower-grid">
         <article className="panel"><div className="panel-head"><span>TOP-DOWN MARKET MAP</span><span>4H → 1M</span></div><div className="timeframes">{scalp?.timeframeAnalysis.map((row) => <div className="tf-row" key={row.timeframe}><strong>{row.timeframe.toUpperCase()}</strong><span className={`pill ${row.bias.toLowerCase()}`}>{row.bias}</span><span>{row.score}/100</span><small>Net {row.directionalScore > 0 ? "+" : ""}{row.directionalScore} · RSI {row.rsi} · ADX {row.adx}</small></div>)}</div></article>
-        <article className="panel"><div className="panel-head"><span>WHY / WHY NOT ENTRY?</span><span>V5</span></div><ul className="reasons">{(scalp?.reasons ?? ["Waiting for data..."]).map((r) => <li key={r}>{r}</li>)}</ul><div className="research-note">V5 sengaja membedakan directional bias dan izin entry. BUY/SELL tidak otomatis berarti entry sekarang. Risk gate, micro alignment, liquidity space, dan R:R harus lolos dulu.</div></article>
+        <article className="panel"><div className="panel-head"><span>WHY / WHY NOT ENTRY?</span><span>V6</span></div><ul className="reasons">{(scalp?.reasons ?? ["Waiting for data..."]).map((r) => <li key={r}>{r}</li>)}</ul><div className="research-note">V6 selalu memberi predictive direction + entry zone, tetapi ENTER NOW hanya muncul saat harga sudah berada di micro zone, 1M/5M align, momentum tidak overextended, dan SL tetap ≤ cap saldo/pip.</div></article>
       </section>
 
-      <section className="panel history"><div className="panel-head"><span>FROZEN 1M DECISIONS</span><span>browser-local</span></div>{!history.length ? <div className="empty">Belum ada minute snapshot.</div> : <div className="table-wrap"><table><thead><tr><th>Time</th><th>Side</th><th>Action</th><th>Conf</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Risk%</th></tr></thead><tbody>{history.map((r) => <tr key={r.id}><td>{new Date(r.at).toLocaleString()}</td><td><span className={`pill ${r.side.toLowerCase()}`}>{r.side}</span></td><td>{r.action}</td><td>{r.confidence}</td><td>{px(r.entry)}</td><td>{px(r.stop)}</td><td>{px(r.tp1)}</td><td>{px(r.tp2)}</td><td>{r.riskPct.toFixed(1)}%</td></tr>)}</tbody></table></div>}</section>
+      <section className="panel history"><div className="panel-head"><span>FROZEN 1M DECISIONS</span><span>browser-local</span></div>{!history.length ? <div className="empty">Belum ada minute snapshot.</div> : <div className="table-wrap"><table><thead><tr><th>Time</th><th>Side</th><th>Action</th><th>Conf</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Risk%</th></tr></thead><tbody>{history.map((r) => <tr key={r.id}><td>{new Intl.DateTimeFormat("id-ID", { timeZone: "Asia/Jakarta", dateStyle: "short", timeStyle: "medium" }).format(new Date(r.at)) + " WIB"}</td><td><span className={`pill ${r.side.toLowerCase()}`}>{r.side}</span></td><td>{r.action}</td><td>{r.confidence}</td><td>{px(r.entry)}</td><td>{px(r.stop)}</td><td>{px(r.tp1)}</td><td>{px(r.tp2)}</td><td>{r.riskPct.toFixed(1)}%</td></tr>)}</tbody></table></div>}</section>
     </main>
   );
 }

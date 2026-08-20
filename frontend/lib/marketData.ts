@@ -3,8 +3,8 @@ import type { Candle } from "../types";
 const BASE = "https://api.twelvedata.com/time_series";
 const WS_BASE = "wss://ws.twelvedata.com/v1/quotes/price";
 const KEY_NAME = "twelve_data_api_key";
-const FRAME_CACHE = "xau_scalp_frames_v5";
-const FRAME_CACHE_AT = "xau_scalp_frames_v5_at";
+const FRAME_CACHE = "xau_scalp_frames_v6";
+const FRAME_CACHE_AT = "xau_scalp_frames_v6_at";
 const CACHE_MAX_AGE_MS = 4 * 60 * 60_000;
 
 export type MarketFrames = {
@@ -208,13 +208,14 @@ export function applyRealtimeTick(frames: MarketFrames, tick: RealtimeTick): Mar
   // Ignore severely out-of-order provider events so a stale tick cannot corrupt chart chronology.
   if (lastMs && tick.timestampMs < lastMs - 90_000) return frames;
   const safeTimestamp = tick.timestampMs > Date.now() + 60_000 ? Date.now() : tick.timestampMs;
-  return sanitizeFrames({
+  // V6 hot path: rows were sanitized on load/cache. Do not re-scan thousands of candles on every tick.
+  return {
     c1: upsertTick(frames.c1, tick.price, safeTimestamp, 1, 1800),
     c5: upsertTick(frames.c5, tick.price, safeTimestamp, 5, 700),
     c15: upsertTick(frames.c15, tick.price, safeTimestamp, 15, 500),
     c1h: upsertTick(frames.c1h, tick.price, safeTimestamp, 60, 350),
     c4h: upsertTick(frames.c4h, tick.price, safeTimestamp, 240, 280),
-  });
+  };
 }
 
 function mergeCandles(base: Candle[], recent: Candle[], keep = 700) {

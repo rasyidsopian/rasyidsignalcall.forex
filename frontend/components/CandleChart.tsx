@@ -11,6 +11,26 @@ import {
 } from "lightweight-charts";
 import type { Candle } from "../types";
 
+const WIB_TIME = new Intl.DateTimeFormat("id-ID", {
+  timeZone: "Asia/Jakarta",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+const WIB_TICK = new Intl.DateTimeFormat("id-ID", {
+  timeZone: "Asia/Jakarta",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+function timeToDate(time: any) {
+  if (typeof time === "number") return new Date(time * 1000);
+  if (typeof time === "string") return new Date(time);
+  if (time && typeof time === "object" && "year" in time) return new Date(Date.UTC(time.year, time.month - 1, time.day));
+  return new Date();
+}
+
 function valid(c: Candle) {
   const ts = new Date(c.timestamp).getTime();
   return Number.isFinite(ts) && ts > 0 && [c.open, c.high, c.low, c.close].every(Number.isFinite) && c.high >= c.low;
@@ -48,9 +68,17 @@ export default function CandleChart({ candles }: { candles: Candle[] }) {
     const chart = createChart(ref.current, {
       height: 400,
       layout: { background: { type: ColorType.Solid, color: "#0b1020" }, textColor: "#9ba7bd" },
+      localization: { timeFormatter: (time: any) => `${WIB_TIME.format(timeToDate(time))} WIB` },
       grid: { vertLines: { color: "#182035" }, horzLines: { color: "#182035" } },
       rightPriceScale: { borderColor: "#25304a", autoScale: true },
-      timeScale: { borderColor: "#25304a", timeVisible: true, secondsVisible: true, rightOffset: 4, barSpacing: 6 },
+      timeScale: {
+        borderColor: "#25304a",
+        timeVisible: true,
+        secondsVisible: true,
+        rightOffset: 4,
+        barSpacing: 6,
+        tickMarkFormatter: (time: any) => WIB_TICK.format(timeToDate(time)),
+      },
     });
     const series = chart.addCandlestickSeries({
       upColor: "#19c37d", downColor: "#ef4f5f", borderVisible: false,
@@ -107,5 +135,5 @@ export default function CandleChart({ candles }: { candles: Candle[] }) {
     lastLengthRef.current = candles.length;
   }, [candles]);
 
-  return <div ref={ref} className="chart" aria-label="Realtime XAU/USD one-minute candlestick chart" />;
+  return <div ref={ref} className="chart" aria-label="Realtime XAU/USD one-minute candlestick chart in Asia/Jakarta (WIB) time" />;
 }

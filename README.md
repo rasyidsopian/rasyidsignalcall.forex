@@ -1,28 +1,25 @@
-# Rasyid Signal Call — XAU/USD V5
+# Rasyid Signal Call — XAU/USD V6 Tight Scalp
 
-GitHub Pages dashboard for personal XAU/USD analysis.
+GitHub Pages-only personal XAU/USD dashboard.
 
-## V5 changes
+## V6 changes
 
-- separates **Scalping Setup** from **Daily Setup**
-- realtime WebSocket tick chart; current 1M candle updates on every received provider tick
-- optimized chart hot path (only current candle updates between minute rolls)
-- scalp setup focuses on **5M + 1M execution**, with 15M structure confirmation
-- daily setup focuses on **4H + 1H + 15M**
-- explicit **ENTER NOW / WAIT / NO ENTRY RISK / MARKET CLOSED** gate
-- two-position plan: default **2 × 0.01 lot**
-- default balance **Rp1,000,000**
-- broker-aware risk calculator using configurable contract size and USD/IDR estimate
-- position #1 targets ~1.5R; position #2 targets ~2.5R when liquidity space permits
-- BE guidance delays stop-to-entry until TP1 + 1M confirmation
-- 1 / 5 / 10 minute scenario projections (edge score, not guaranteed probability)
-- Saturday mode: standard XAU/USD is treated as closed/preparation-only unless actual live ticks are present
-- backtest metrics remain closed-candle based; no fabricated win rate
+- Realtime Twelve Data WebSocket tick stream.
+- No 35 ms analysis throttle: every received provider tick updates chart + micro setup.
+- Dashboard reports measured in-browser engine calculation latency and provider tick age separately.
+- Chart clock is explicitly formatted in Asia/Jakarta (WIB), fixing the previous UTC-looking axis.
+- Predictive 1m / 5m / 10m calls now show direction, entry zone, SL, TP1, TP2 and R:R.
+- Tight scalp engine prioritizes 1M + 5M and moves the predictive entry zone toward confirmed micro structure instead of widening the SL.
+- Default maximum scalp SL: 25 pips.
+- Default pip size: 0.01. Change this in the dashboard if the broker defines XAU/USD pips differently.
+- Balance-aware stop cap: the effective stop is the lower of the configured pip cap and the distance implied by the account risk budget.
+- TP1 targets ~1.8R and TP2 ~2.6R when nearby 5M liquidity allows it.
+- Backtest reports only executable V6 tight-stop calls; performance is not hardcoded or guaranteed.
 
-## Important risk note
+## Important latency note
 
-Default risk math assumes 1 standard XAU/USD lot = 100 oz. Broker contract specifications can differ. The dashboard therefore exposes contract size and USD/IDR as editable settings. With a Rp1,000,000 account, **2 × 0.01 lot can easily exceed a reasonable percentage risk if a structurally valid gold stop is several dollars wide**. V5 does not shrink the stop just to force a trade; it returns NO ENTRY when the configured position size is too large for the risk budget.
+The dashboard can process a received WebSocket tick immediately, but it cannot force the upstream data vendor or internet path to deliver ticks in 1–20 ms. The UI separates engine processing time from provider/feed age for this reason.
 
-## GitHub Pages
+## Risk note
 
-Upload the contents of this folder to the repository root. GitHub Actions deploys `frontend/out` automatically.
+A tight 25-pip SL can be too small for XAU/USD during volatile periods, spread expansion or slippage. V6 therefore prefers WAIT ENTRY ZONE / WAIT RECLAIM rather than chasing price with a larger stop. Verify XAU/USD contract size, pip definition and execution conditions with the broker before using the sizing output.

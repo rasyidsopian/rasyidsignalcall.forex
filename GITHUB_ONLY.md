@@ -1,9 +1,17 @@
-# GitHub-only deploy
+# Deploy V6 on GitHub Pages
 
-1. Upload the **contents** of this folder to the repository root.
-2. Keep `.github/workflows/pages.yml`.
-3. Commit to `main`.
-4. GitHub Actions builds `frontend/` and publishes `frontend/out`.
-5. Hard-refresh the live site after the workflow turns green.
+1. Extract the ZIP.
+2. Open the extracted `rasyidsignalcall.scalping-v6` folder.
+3. In the GitHub repository, choose **Code → Add file → Upload files**.
+4. Upload the contents of the folder, not the wrapper folder itself.
+5. Commit to `main` with message: `Deploy XAUUSD tight scalp V6`.
+6. Wait for **Deploy GitHub Pages** to turn green in Actions.
+7. Open the Pages URL and hard-refresh (`Ctrl+F5`).
 
-V5 requires no Railway/Render backend. Twelve Data REST is used for historical initialization and WebSocket for live XAU/USD ticks.
+Expected paths include:
+
+- `frontend/lib/strategyV6.ts`
+- `frontend/lib/marketData.ts`
+- `frontend/components/Dashboard.tsx`
+- `frontend/components/CandleChart.tsx`
+- `.github/workflows/pages.yml`
