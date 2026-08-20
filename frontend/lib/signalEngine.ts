@@ -260,13 +260,17 @@ export function generateSignal(
   c1hRaw: Candle[],
   c4hRaw: Candle[],
   evaluationMs?: number,
+  liveIntrabar = false,
 ): Signal {
   const evalMs = evaluationMs ?? Date.now();
-  const c1 = completedBefore(c1Raw, "1m", evalMs);
-  const c5 = completedBefore(c5Raw, "5m", evalMs);
-  const c15 = completedBefore(c15Raw, "15m", evalMs);
-  const c1h = completedBefore(c1hRaw, "1h", evalMs);
-  const c4h = completedBefore(c4hRaw, "4h", evalMs);
+  const select = (rows: Candle[], tf: string) => liveIntrabar
+    ? rows.filter((c) => new Date(c.timestamp).getTime() <= evalMs)
+    : completedBefore(rows, tf, evalMs);
+  const c1 = select(c1Raw, "1m");
+  const c5 = select(c5Raw, "5m");
+  const c15 = select(c15Raw, "15m");
+  const c1h = select(c1hRaw, "1h");
+  const c4h = select(c4hRaw, "4h");
 
   const analyses = [
     analyzeTimeframe(c4h, "4h"),
@@ -306,12 +310,12 @@ export function generateSignal(
     take_profit_2: levels.tp2,
     risk_reward: levels.rr,
     market_regime: regime,
-    timestamp: new Date(new Date(last1.timestamp).getTime() + 60_000).toISOString(),
-    status: confidence >= 75 ? "HIGH_CONVICTION" : confidence >= 62 ? "VALID" : "LOW_EDGE",
+    timestamp: liveIntrabar ? new Date(evalMs).toISOString() : new Date(new Date(last1.timestamp).getTime() + 60_000).toISOString(),
+    status: liveIntrabar ? (confidence >= 75 ? "LIVE HIGH" : confidence >= 62 ? "LIVE VALID" : "LIVE LOW EDGE") : (confidence >= 75 ? "HIGH_CONVICTION" : confidence >= 62 ? "VALID" : "LOW_EDGE"),
     reasons,
     timeframe_analysis: analyses,
     strategy_name: "xau_mtf_scalper",
-    strategy_version: "1.0.1",
+    strategy_version: liveIntrabar ? "2.0.0-live" : "2.0.0",
   };
 }
 

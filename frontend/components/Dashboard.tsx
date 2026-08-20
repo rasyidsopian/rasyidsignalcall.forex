@@ -3,18 +3,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import CandleChart from "./CandleChart";
 import {
+  applyRealtimeTick,
+  cacheMarketFrames,
   clearApiKey,
+  connectRealtimeXauUsd,
   fetchAllTimeframes,
   getCachedFrames,
   getSavedApiKey,
   refreshFromOneMinute,
   saveApiKey,
   type MarketFrames,
+  type StreamState,
 } from "../lib/marketData";
 import { backtestStrategy, generateSignal, matchingSetupStats } from "../lib/signalEngine";
 import type { BacktestStats, Signal } from "../types";
 
 type HistoryRow = Signal & { id: string; created_at: string };
+type PendingFlip = { side: "BUY" | "SELL"; count: number; since: number; signal: Signal } | null;
 
 function price(value: number | null | undefined) {
   return value == null ? "—" : value.toFixed(2);
@@ -25,27 +30,32 @@ function percent(value: number | null | undefined) {
 }
 
 function loadHistory(): HistoryRow[] {
-  try { return JSON.parse(localStorage.getItem("xau_scalp_signal_history") ?? "[]"); }
+  try { return JSON.parse(localStorage.getItem("xau_scalp_signal_history_v3") ?? "[]"); }
   catch { return []; }
 }
 
 function saveHistory(rows: HistoryRow[]) {
-  localStorage.setItem("xau_scalp_signal_history", JSON.stringify(rows.slice(0, 120)));
+  localStorage.setItem("xau_scalp_signal_history_v3", JSON.stringify(rows.slice(0, 180)));
 }
 
 export default function Dashboard() {
   const [apiKey, setApiKey] = useState("");
   const [draftKey, setDraftKey] = useState("");
   const [signal, setSignal] = useState<Signal | null>(null);
+  const signalRef = useRef<Signal | null>(null);
   const [frames, setFrames] = useState<MarketFrames | null>(null);
   const framesRef = useRef<MarketFrames | null>(null);
   const [history, setHistory] = useState<HistoryRow[]>([]);
   const [backtest, setBacktest] = useState<BacktestStats | null>(null);
   const [setupStats, setSetupStats] = useState<BacktestStats | null>(null);
-  const [connected, setConnected] = useState(false);
+  const [streamState, setStreamState] = useState<StreamState>("CLOSED");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
+  const [lastTickAt, setLastTickAt] = useState<number | null>(null);
+  const [tickCount, setTickCount] = useState(0);
+  const lastSignalCalcRef = useRef(0);
+  const pendingFlipRef = useRef<PendingFlip>(null);
 
   useEffect(() => {
     const saved = getSavedApiKey();
@@ -54,42 +64,55 @@ export default function Dashboard() {
     setHistory(loadHistory());
   }, []);
 
-  async function refresh(key = apiKey, forceFull = false) {
-    if (!key || loading) return;
-    setLoading(true);
-    try {
-      const current = framesRef.current;
-      const cached = !current && forceFull ? getCachedFrames() : null;
-      const nextFrames = current
-        ? await refreshFromOneMinute(key, current)
-        : cached
-          ? await refreshFromOneMinute(key, cached)
-          : await fetchAllTimeframes(key);
+  function publishSignal(next: Signal) {
+    signalRef.current = next;
+    setSignal(next);
+  }
 
+  function recalcResearch(nextFrames: MarketFrames, currentSignal?: Signal) {
+    const bt = backtestStrategy(nextFrames.c1, nextFrames.c5, nextFrames.c15, nextFrames.c1h, nextFrames.c4h, 160);
+    setBacktest(bt);
+    const basis = currentSignal ?? signalRef.current;
+    if (basis) setSetupStats(matchingSetupStats(bt, basis));
+  }
+
+  async function loadMarket(key: string) {
+    setLoading(true);
+    setReady(false);
+    setError(null);
+    try {
+      const cached = getCachedFrames();
+      // Cached startup costs only 1 REST call to fill the gap. True cold start costs 5 sequential calls.
+      const nextFrames = cached ? await refreshFromOneMinute(key, cached) : await fetchAllTimeframes(key);
       framesRef.current = nextFrames;
       setFrames(nextFrames);
-
-      const nextSignal = generateSignal(nextFrames.c1, nextFrames.c5, nextFrames.c15, nextFrames.c1h, nextFrames.c4h);
-      const bt = backtestStrategy(nextFrames.c1, nextFrames.c5, nextFrames.c15, nextFrames.c1h, nextFrames.c4h, 120);
-      const matched = matchingSetupStats(bt, nextSignal);
-
-      setSignal(nextSignal);
-      setBacktest(bt);
-      setSetupStats(matched);
-      setConnected(true);
-      setError(null);
-      setLastUpdated(new Date().toISOString());
-
-      const id = `${nextSignal.timestamp}-${nextSignal.signal}`;
-      setHistory((previous) => {
-        if (previous.some((row) => row.id === id)) return previous;
-        const rows = [{ ...nextSignal, id, created_at: nextSignal.timestamp }, ...previous].slice(0, 120);
-        saveHistory(rows);
-        return rows;
-      });
+      const live = generateSignal(nextFrames.c1, nextFrames.c5, nextFrames.c15, nextFrames.c1h, nextFrames.c4h, Date.now(), true);
+      publishSignal(live);
+      recalcResearch(nextFrames, live);
+      setReady(true);
     } catch (e) {
-      setConnected(false);
-      setError(e instanceof Error ? e.message : "Market data error");
+      setError(e instanceof Error ? e.message : "Market data initialization error");
+      setReady(false);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function syncHistory() {
+    const key = apiKey;
+    const current = framesRef.current;
+    if (!key || !current || loading) return;
+    setLoading(true);
+    try {
+      const nextFrames = await refreshFromOneMinute(key, current);
+      framesRef.current = nextFrames;
+      setFrames(nextFrames);
+      const live = generateSignal(nextFrames.c1, nextFrames.c5, nextFrames.c15, nextFrames.c1h, nextFrames.c4h, Date.now(), true);
+      publishSignal(live);
+      recalcResearch(nextFrames, live);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Historical sync failed");
     } finally {
       setLoading(false);
     }
@@ -98,16 +121,115 @@ export default function Dashboard() {
   useEffect(() => {
     if (!apiKey) return;
     framesRef.current = null;
-    void refresh(apiKey, true);
-    const timer = window.setInterval(() => void refresh(apiKey), 60_000);
-    return () => window.clearInterval(timer);
+    signalRef.current = null;
+    pendingFlipRef.current = null;
+    setFrames(null);
+    setSignal(null);
+    setBacktest(null);
+    setSetupStats(null);
+    setTickCount(0);
+    void loadMarket(apiKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey]);
+
+  useEffect(() => {
+    if (!apiKey || !ready || !framesRef.current) return;
+
+    return connectRealtimeXauUsd(apiKey, {
+      onState: setStreamState,
+      onError: (message) => setError(message),
+      onTick: (tick) => {
+        const current = framesRef.current;
+        if (!current) return;
+
+        const previousMinute = current.c1.at(-1)?.timestamp;
+        const nextFrames = applyRealtimeTick(current, tick);
+        const nextMinute = nextFrames.c1.at(-1)?.timestamp;
+        const minuteRolled = Boolean(previousMinute && nextMinute && previousMinute !== nextMinute);
+
+        framesRef.current = nextFrames;
+        setFrames(nextFrames);
+        setLastTickAt(Date.now());
+        setTickCount((n) => n + 1);
+        setError(null);
+
+        const now = performance.now();
+        if (now - lastSignalCalcRef.current >= 500) {
+          lastSignalCalcRef.current = now;
+          try {
+            const candidate = generateSignal(
+              nextFrames.c1,
+              nextFrames.c5,
+              nextFrames.c15,
+              nextFrames.c1h,
+              nextFrames.c4h,
+              tick.timestampMs,
+              true,
+            );
+            const existing = signalRef.current;
+
+            // Keep levels/confidence live when side is stable. Require a short confirmation before flipping side.
+            if (!existing || existing.signal === candidate.signal) {
+              pendingFlipRef.current = null;
+              publishSignal(candidate);
+            } else {
+              const pending = pendingFlipRef.current;
+              if (!pending || pending.side !== candidate.signal) {
+                pendingFlipRef.current = { side: candidate.signal, count: 1, since: Date.now(), signal: candidate };
+              } else {
+                const updated = { ...pending, count: pending.count + 1, signal: candidate };
+                pendingFlipRef.current = updated;
+                if (updated.count >= 3 && Date.now() - updated.since >= 1000) {
+                  publishSignal(candidate);
+                  pendingFlipRef.current = null;
+                }
+              }
+            }
+          } catch {
+            // Keep the previous valid call while a just-opened candle lacks enough derived data.
+          }
+        }
+
+        if (minuteRolled) {
+          // Freeze one closed-candle call per minute for auditability, and refresh historical WR off closed bars only.
+          try {
+            const frozen = generateSignal(
+              nextFrames.c1,
+              nextFrames.c5,
+              nextFrames.c15,
+              nextFrames.c1h,
+              nextFrames.c4h,
+              tick.timestampMs,
+              false,
+            );
+            const id = `${frozen.timestamp}-${frozen.signal}`;
+            setHistory((previous) => {
+              if (previous.some((row) => row.id === id)) return previous;
+              const rows = [{ ...frozen, id, created_at: frozen.timestamp }, ...previous].slice(0, 180);
+              saveHistory(rows);
+              return rows;
+            });
+            recalcResearch(nextFrames, signalRef.current ?? frozen);
+            cacheMarketFrames(nextFrames);
+          } catch {
+            // Research metrics remain at last completed snapshot if this minute is not evaluable yet.
+          }
+        }
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiKey, ready]);
+
+  useEffect(() => {
+    if (backtest && signal) setSetupStats(matchingSetupStats(backtest, signal));
+  }, [backtest, signal]);
 
   const currentPrice = useMemo(() => frames?.c1.at(-1)?.close ?? signal?.entry_price ?? null, [frames, signal]);
   const tone = signal?.signal === "BUY" ? "buy" : "sell";
   const chartCandles = frames?.c1 ?? [];
   const sampleQuality = (setupStats?.sampleSize ?? 0) >= 30 ? "GOOD SAMPLE" : (setupStats?.sampleSize ?? 0) >= 12 ? "EARLY SAMPLE" : "LOW SAMPLE";
+  const isLive = streamState === "LIVE";
+  const tickAge = lastTickAt ? Math.max(0, (Date.now() - lastTickAt) / 1000) : null;
 
   function connectKey() {
     const key = draftKey.trim();
@@ -120,29 +242,34 @@ export default function Dashboard() {
     clearApiKey();
     setApiKey("");
     setDraftKey("");
-    setConnected(false);
+    setReady(false);
+    setStreamState("CLOSED");
     setSignal(null);
+    signalRef.current = null;
     setFrames(null);
     framesRef.current = null;
     setBacktest(null);
     setSetupStats(null);
+    setLastTickAt(null);
   }
 
   return (
     <main className="shell">
       <header className="topbar">
         <div>
-          <div className="eyebrow">RASYID SIGNAL CALL · SCALPING MODE</div>
+          <div className="eyebrow">RASYID SIGNAL CALL · REALTIME SCALPING V3</div>
           <h1>XAU/USD</h1>
-          <div className="subline">4H → 1H → 15M → 5M → 1M · directional call setiap update</div>
+          <div className="subline">4H → 1H → 15M → 5M → 1M · REST history + live WebSocket execution</div>
         </div>
-        <div className={`status ${connected ? "online" : "offline"}`}><span /> {connected ? "LIVE" : apiKey ? "RECONNECTING" : "API KEY REQUIRED"}</div>
+        <div className={`status ${isLive ? "online" : "offline"}`}>
+          <span /> {apiKey ? `WS ${streamState}` : "API KEY REQUIRED"}
+        </div>
       </header>
 
       {!apiKey && (
         <section className="panel connect-panel">
           <div className="panel-head"><span>CONNECT MARKET DATA</span><span>Twelve Data</span></div>
-          <p>Masukkan API key Twelve Data. Key disimpan hanya di browser ini (localStorage), bukan di GitHub.</p>
+          <p>Masukkan API key Twelve Data. Untuk versi GitHub Pages, key tersimpan hanya di browser ini tetapi tetap dapat terlihat oleh JavaScript/network browser; gunakan hanya untuk dashboard personal.</p>
           <div className="connect-row">
             <input value={draftKey} onChange={(e) => setDraftKey(e.target.value)} placeholder="Paste Twelve Data API key" type="password" />
             <button onClick={connectKey}>CONNECT</button>
@@ -152,10 +279,10 @@ export default function Dashboard() {
 
       {apiKey && (
         <div className="toolbar">
-          <span>{lastUpdated ? `Last update ${new Date(lastUpdated).toLocaleTimeString()}` : "Loading multi-timeframe data..."}</span>
-          <span className="usage-note">Cold start maks. 5 calls; reload pakai cache + 1 call/menit.</span>
+          <span>{lastTickAt ? `Last tick ${new Date(lastTickAt).toLocaleTimeString()} · ${tickAge?.toFixed(1)}s ago` : loading ? "Loading historical data..." : "Waiting for first live tick..."}</span>
+          <span className="usage-note">WebSocket drives realtime chart/call · REST only for history sync · ticks {tickCount}</span>
           <div>
-            <button onClick={() => void refresh()} disabled={loading}>{loading ? "REFRESHING..." : "REFRESH NOW"}</button>
+            <button onClick={() => void syncHistory()} disabled={loading || !frames}>{loading ? "SYNCING..." : "SYNC HISTORY"}</button>
             <button onClick={disconnectKey}>CHANGE API KEY</button>
           </div>
         </div>
@@ -165,22 +292,22 @@ export default function Dashboard() {
 
       <section className="hero-grid">
         <article className="panel market-panel">
-          <div className="panel-head"><span>Gold Spot / U.S. Dollar</span><span>1M EXECUTION CHART</span></div>
-          <div className="market-price">{price(currentPrice)}</div>
+          <div className="panel-head"><span>Gold Spot / U.S. Dollar</span><span>{isLive ? "● LIVE TICK · 1M" : "1M EXECUTION CHART"}</span></div>
+          <div className="market-price">{price(currentPrice)} <small className={`live-tag ${isLive ? "on" : ""}`}>{isLive ? "STREAMING" : streamState}</small></div>
           <CandleChart candles={chartCandles} />
         </article>
 
         <aside className={`panel signal-panel ${tone}`}>
           <div className="panel-head"><span>SCALP CALL NOW</span><span>{signal?.status ?? "WAITING"}</span></div>
           <div className="signal-name">{signal?.signal ?? "—"}</div>
-          <div className="confidence"><span>{signal?.confidence ?? 0}</span><small>/100 confluence</small></div>
+          <div className="confidence"><span>{signal?.confidence ?? 0}</span><small>/100 live confluence</small></div>
           <div className="winrate-block">
-            <div><small>CURRENT SETUP WR</small><strong>{percent(setupStats?.winRate)}</strong></div>
+            <div><small>HISTORICAL SETUP WR</small><strong>{percent(setupStats?.winRate)}</strong></div>
             <div><small>SAMPLE</small><strong>N={setupStats?.sampleSize ?? 0}</strong></div>
-            <div className="sample-badge">{sampleQuality}</div>
+            <div className="sample-badge">{sampleQuality} · CLOSED-CANDLE TEST</div>
           </div>
           <div className="levels">
-            <div><small>ENTRY</small><strong>{price(signal?.entry_price)}</strong></div>
+            <div><small>ENTRY NOW</small><strong>{price(signal?.entry_price)}</strong></div>
             <div><small>STOP LOSS</small><strong>{price(signal?.stop_loss)}</strong></div>
             <div><small>TP1 · 1R</small><strong>{price(signal?.take_profit_1)}</strong></div>
             <div><small>TP2 · 1.5R</small><strong>{price(signal?.take_profit_2)}</strong></div>
@@ -192,9 +319,9 @@ export default function Dashboard() {
 
       <section className="stats-grid">
         <article className="panel metric-card">
-          <div className="panel-head"><span>RECENT STRATEGY BACKTEST</span><span>TP1 BEFORE SL · 20M MAX HOLD</span></div>
+          <div className="panel-head"><span>RECENT STRATEGY BACKTEST</span><span>CLOSED BARS ONLY</span></div>
           <div className="metric-main">{percent(backtest?.winRate)}</div>
-          <div className="metric-caption">Win rate · N={backtest?.sampleSize ?? 0}</div>
+          <div className="metric-caption">TP1 before SL · max hold 20M · N={backtest?.sampleSize ?? 0}</div>
           <div className="mini-metrics">
             <span>WINS <strong>{backtest?.wins ?? 0}</strong></span>
             <span>LOSSES <strong>{backtest?.losses ?? 0}</strong></span>
@@ -205,7 +332,7 @@ export default function Dashboard() {
         <article className="panel metric-card">
           <div className="panel-head"><span>CURRENT SETUP MATCH</span><span>{signal?.signal ?? "—"}</span></div>
           <div className="metric-main">{percent(setupStats?.winRate)}</div>
-          <div className="metric-caption">Similar recent calls · N={setupStats?.sampleSize ?? 0}</div>
+          <div className="metric-caption">Similar historical calls · N={setupStats?.sampleSize ?? 0}</div>
           <div className="mini-metrics">
             <span>WINS <strong>{setupStats?.wins ?? 0}</strong></span>
             <span>LOSSES <strong>{setupStats?.losses ?? 0}</strong></span>
@@ -216,7 +343,7 @@ export default function Dashboard() {
 
       <section className="lower-grid">
         <article className="panel">
-          <div className="panel-head"><span>TOP-DOWN ANALYSIS</span><span>HIGH → LOW</span></div>
+          <div className="panel-head"><span>LIVE TOP-DOWN ANALYSIS</span><span>HIGH → LOW</span></div>
           <div className="timeframes">
             {signal?.timeframe_analysis?.map((item) => (
               <div className="tf-row" key={item.timeframe}>
@@ -233,14 +360,14 @@ export default function Dashboard() {
           <div className="panel-head"><span>WHY THIS CALL?</span><span>{signal?.strategy_version ?? "v—"}</span></div>
           <ul className="reasons">{(signal?.reasons ?? ["Waiting for market data..."]).map((reason) => <li key={reason}>{reason}</li>)}</ul>
           <div className="research-note">
-            Call BUY/SELL selalu tersedia, tapi confluence ≠ probability. Win rate di atas dihitung dari recent historical candles dengan aturan TP1-before-SL; bukan jaminan trade berikutnya menang.
+            LIVE confluence memakai candle intrabar yang berubah bersama tick. Historical win rate tetap dihitung hanya dari candle yang sudah close untuk menghindari future leakage. Call yang disimpan ke history dibekukan satu kali saat candle 1M berganti.
           </div>
         </article>
       </section>
 
       <section className="panel history">
-        <div className="panel-head"><span>CALL HISTORY</span><span>Latest completed 1M candle · stored in this browser</span></div>
-        {history.length === 0 ? <div className="empty">Belum ada call tersimpan.</div> : (
+        <div className="panel-head"><span>FROZEN 1M CALL HISTORY</span><span>Immutable snapshot · stored in this browser</span></div>
+        {history.length === 0 ? <div className="empty">Belum ada closed-minute call tersimpan.</div> : (
           <div className="table-wrap"><table><thead><tr><th>Time</th><th>Call</th><th>Confluence</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Regime</th></tr></thead><tbody>
             {history.map((row) => <tr key={row.id}>
               <td>{new Date(row.created_at).toLocaleString()}</td>
