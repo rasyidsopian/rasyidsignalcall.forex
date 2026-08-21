@@ -1,10 +1,11 @@
-# Browser-only deploy
+# GitHub-only deployment — V8
 
-1. Open the GitHub repository.
-2. Code → Add file → Upload files.
-3. Upload the **contents** of this folder, not the wrapper folder.
-4. Commit to `main` with message: `Deploy XAUUSD mapped-entry V7`.
-5. Wait for **Deploy GitHub Pages** to turn green.
-6. Open the Pages URL and hard-refresh with Ctrl+F5.
+1. Extract the V8 ZIP.
+2. Open your GitHub repository.
+3. `Code` → `Add file` → `Upload files`.
+4. Upload the **contents** of the V8 folder so paths remain `frontend/...` and `.github/workflows/...`.
+5. Commit to `main` with message: `Deploy XAUUSD adaptive zone V8`.
+6. Wait for **Deploy GitHub Pages** to turn green.
+7. Open the Pages URL and hard refresh (`Ctrl + F5`).
 
-Expected header: `RASYID SIGNAL CALL · XAUUSD V7 MAPPED ENTRY`.
+Expected header: `RASYID SIGNAL CALL · XAUUSD V8 ADAPTIVE ZONE`.

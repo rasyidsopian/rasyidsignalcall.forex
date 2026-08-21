@@ -1,30 +1,27 @@
-# Rasyid Signal Call — XAU/USD V7 Mapped Entry
+# Rasyid Signal Call — XAU/USD V8 Adaptive Realtime Zone Engine
 
-GitHub Pages-only personal XAU/USD signal dashboard.
+Static GitHub Pages XAU/USD research dashboard using Twelve Data REST for historical initialization and WebSocket price events for realtime updates.
 
-## V7 focus
+## V8 changes
 
-- Separate SCALP and DAILY predictive setups.
-- User pip convention: **1 pip = $0.10 XAU/USD price movement**, so **25 pips = $2.50 movement**.
-- Default account: Rp1,000,000, 2 positions, 0.01 lot each, 100 oz / lot.
-- Account-capped stop distance: the entry zone adapts to the configured risk budget instead of allowing a huge structural SL.
-- Fibonacci 50 / 61.8 / 70.5 retracement mapping + EMA value + confirmed pivots + liquidity sweep + RSI/ADX/MACD/top-down context.
-- Exact entry, entry zone, SL, TP1, TP2 and R:R shown for both scalp and daily setups.
-- Once live price is inside a mapped zone, status immediately becomes `ENTER BUY NOW` or `ENTER SELL NOW`; there is no extra WAIT gate inside the zone.
-- Chart overlays show scalp and daily entry-zone boxes plus exact entry / SL / TP lines.
-- 1/5/10-minute predictive cards show exact execution levels.
-- Separate mapped-zone backtests for scalp and daily setups. Win rate is historical, never hardcoded.
-- WebSocket event is processed immediately with no artificial throttle. UI reports **LOCAL PIPELINE** separately from upstream provider event gaps/timestamps.
-- Live candle bucketing uses browser receive time so the chart clock remains current in WIB even when the provider timestamp is coarse/stale.
+- Adaptive rolling entry zone: old zones are retired when stale, displaced, invalidated, or when TP1 is reached before entry.
+- New setup is remapped automatically from the latest 1M/5M structure instead of waiting forever for an obsolete zone.
+- Main UI is intentionally simplified into **Realtime Action**, **Predictive Zone**, and **Performance**.
+- Chart shows one active scalp zone only, plus exact Entry, SL, TP1 and TP2.
+- 1M / 5M / 10M predictive bias is separate from the realtime execution action.
+- Frozen zone lifecycle archive records replaced/missed zones without rewriting their original levels.
+- Local event-to-UI latency is measured separately from provider tick interval / feed timestamp age.
+- Local target is <=100 ms after the browser receives a tick. Upstream market-to-browser latency is not guaranteed by this static app.
+- XAU/USD pip convention in this project: 1 pip = $0.10 price movement; 25 pips = $2.50 price movement.
 
-## Important latency note
+## Deploy on GitHub Pages
 
-V7 targets <=10 ms for local browser processing after a WebSocket event is received. It cannot guarantee <=10 ms end-to-end market-data latency because network/provider delivery is upstream of the app. The dashboard therefore reports local pipeline time, event-to-event gap, and provider timestamp gap separately.
+The repo includes `.github/workflows/pages.yml`. Upload/commit the project to `main`; GitHub Actions builds `frontend` and deploys `frontend/out` to Pages.
 
-## GitHub Pages
+## Data key
 
-Upload the contents of this folder to the repository root and commit to `main`. `.github/workflows/pages.yml` builds and deploys `frontend/out` automatically.
+The Twelve Data API key is entered in the browser and stored in localStorage for this personal dashboard. Do not hardcode private keys in a public repository.
 
-## API key
+## Important
 
-The Twelve Data API key is entered in the browser and stored in localStorage. Do not hardcode a private key into a public repository.
+This is a research/paper-signal dashboard. Historical win rate is shown only from recorded/backtested setups and is not a guaranteed future win rate.

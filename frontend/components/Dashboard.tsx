@@ -16,83 +16,92 @@ import {
   type StreamState,
 } from "../lib/marketData";
 import {
-  backtestDailyMapped,
-  backtestTightScalp,
-  buildDailySetup,
-  buildPredictions,
-  buildScalpingSetup,
-  fastUpdateSetupForPrice,
+  DATA_STALE_THRESHOLD_MS,
   DEFAULT_ACCOUNT,
+  MIN_REMAP_INTERVAL_MS,
+  buildAdaptiveCandidate,
+  buildDailySetup,
+  buildV8Predictions,
+  computeComparablePerformance,
+  currentAction,
+  evaluateAdaptiveZone,
+  updateZoneHot,
   type AccountConfig,
+  type AdaptiveZone,
   type HorizonPrediction,
   type TradeSetup,
-} from "../lib/strategyV7";
+  type ZoneArchive,
+} from "../lib/strategyV8";
 import type { BacktestStats } from "../types";
-
-type FrozenRow = {
-  id: string;
-  at: string;
-  side: "BUY" | "SELL";
-  action: string;
-  entry: number;
-  stop: number;
-  tp1: number;
-  tp2: number;
-  riskPct: number;
-  confidence: number;
-};
 
 const money = new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 });
 const px = (v: number | null | undefined) => v == null || !Number.isFinite(v) ? "—" : v.toFixed(2);
 const pct = (v: number | null | undefined) => v == null ? "—" : `${v.toFixed(1)}%`;
+const formatWib = (ms: number) => new Intl.DateTimeFormat("id-ID", {
+  timeZone: "Asia/Jakarta", hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3, hour12: false,
+}).format(new Date(ms)) + " WIB";
 
 function loadAccount(): AccountConfig {
   try {
-    const saved = JSON.parse(localStorage.getItem("xau_v7_account") ?? "null");
+    const saved = JSON.parse(localStorage.getItem("xau_v8_account") ?? "null");
     return saved ? { ...DEFAULT_ACCOUNT, ...saved } : DEFAULT_ACCOUNT;
   } catch { return DEFAULT_ACCOUNT; }
 }
-function loadHistory(): FrozenRow[] {
-  try { return JSON.parse(localStorage.getItem("xau_v7_history") ?? "[]"); } catch { return []; }
+
+function loadArchive(): ZoneArchive[] {
+  try { return JSON.parse(localStorage.getItem("xau_v8_zone_archive") ?? "[]"); } catch { return []; }
 }
 
-function RiskLine({ setup }: { setup: TradeSetup | null }) {
-  if (!setup) return null;
-  const risk = setup.risk;
+function saveArchive(rows: ZoneArchive[]) {
+  try { localStorage.setItem("xau_v8_zone_archive", JSON.stringify(rows.slice(0, 120))); } catch {}
+}
+
+function ActionPanel({ zone, action, currentPrice, stale }: { zone: AdaptiveZone | null; action: string; currentPrice: number | null; stale: boolean }) {
+  const side = zone?.side.toLowerCase() ?? "neutral";
+  const live = action.startsWith("ENTER");
   return (
-    <div className={`risk-gate ${risk.action === "ENTER_NOW" ? "pass" : risk.action === "SKIP_RISK" ? "fail" : "wait"}`}>
-      <strong>{setup.status}</strong>
-      <span>{risk.message}</span>
-      <small>
-        Total risk {money.format(risk.riskIdr)} ({risk.riskPct.toFixed(1)}%) · budget {risk.maxRiskPct.toFixed(1)}% · blended R:R 1:{risk.blendedRewardR.toFixed(2)}
-      </small>
-    </div>
+    <article className={`panel v8-action-card ${side} ${live ? "live-action" : ""}`}>
+      <div className="panel-head"><span>REALTIME ACTION</span><span>{stale ? "STALE FEED" : zone?.state ?? "MAPPING"}</span></div>
+      <div className="v8-action-title">{action}</div>
+      <div className="v8-current">CURRENT <strong>{px(currentPrice)}</strong></div>
+      <div className="levels compact v8-levels">
+        <div><small>EXACT ENTRY</small><strong>{px(zone?.exactEntry)}</strong></div>
+        <div><small>SL · {zone?.stopPips?.toFixed(1) ?? "—"} PIPS</small><strong>{px(zone?.stop)}</strong></div>
+        <div><small>TP1 · {zone?.rr1?.toFixed(1) ?? "—"}R</small><strong>{px(zone?.tp1)}</strong></div>
+        <div><small>TP2 · {zone?.rr2?.toFixed(1) ?? "—"}R</small><strong>{px(zone?.tp2)}</strong></div>
+      </div>
+      <div className="v8-action-note">{zone?.lifecycleReason ?? "Building the best current executable zone..."}</div>
+    </article>
   );
 }
 
-function SetupCard({ title, setup }: { title: string; setup: TradeSetup | null }) {
-  const tone = setup?.side.toLowerCase() ?? "neutral";
+function ZonePanel({ zone }: { zone: AdaptiveZone | null }) {
+  if (!zone) return <article className="panel v8-zone-card"><div className="panel-head"><span>PREDICTIVE ZONE</span><span>FORMING</span></div><div className="empty">Mapping current market...</div></article>;
   return (
-    <article className={`panel setup-card ${tone}`}>
-      <div className="panel-head"><span>{title}</span><span>{setup?.status ?? "WAITING"}</span></div>
-      <div className="setup-call">
-        <strong>{setup?.side ?? "—"}</strong>
-        <span>{setup ? `${setup.zoneGrade} ZONE · ${setup.zoneScore}/100 · conf ${setup.confidence}/100` : "0/100"}</span>
+    <article className={`panel v8-zone-card ${zone.side.toLowerCase()}`}>
+      <div className="panel-head"><span>PREDICTIVE ZONE</span><span>{zone.zoneGrade} · {zone.zoneScore}/100</span></div>
+      <div className="v8-zone-side">NEXT {zone.side} OPPORTUNITY</div>
+      <div className="v8-zone-range">{px(zone.entryZoneLow)} – {px(zone.entryZoneHigh)}</div>
+      <div className="v8-zone-meta"><span>Preferred <b>{px(zone.exactEntry)}</b></span><span>Setup <b>{zone.setupType}</b></span></div>
+      <div className="v8-zone-meta"><span>Created <b>{formatWib(zone.createdAt)}</b></span><span>State <b>{zone.state}</b></span></div>
+    </article>
+  );
+}
+
+function PerformancePanel({ zone, stats }: { zone: AdaptiveZone | null; stats: BacktestStats | null }) {
+  const sample = stats?.sampleSize ?? 0;
+  const quality = sample >= 100 ? "GOOD SAMPLE" : sample >= 30 ? "EARLY SAMPLE" : "LOW SAMPLE";
+  return (
+    <article className="panel v8-performance-card">
+      <div className="panel-head"><span>PERFORMANCE</span><span>{quality}</span></div>
+      <div className="v8-perf-main">{pct(stats?.winRate)}</div>
+      <div className="metric-caption">Comparable executable mapped-zone backtest · N={sample}</div>
+      <div className="mini-metrics">
+        <span>SETUP <strong>{zone?.setupType ?? "—"}</strong></span>
+        <span>AVG RR <strong>{stats?.averageRiskReward ?? "—"}</strong></span>
+        <span>PF <strong>{stats?.profitFactor ?? "—"}</strong></span>
       </div>
-      <RiskLine setup={setup} />
-      <div className="levels compact">
-        <div><small>EXACT ENTRY</small><strong>{px(setup?.exactEntry)}</strong></div>
-        <div><small>ENTRY ZONE</small><strong>{setup ? `${px(setup.entryZoneLow)} – ${px(setup.entryZoneHigh)}` : "—"}</strong></div>
-        <div><small>STOP · {setup?.stopPips?.toFixed(1) ?? "—"} PIPS</small><strong>{px(setup?.stop)}</strong></div>
-        <div><small>EFFECTIVE MAX STOP</small><strong>{setup?.maxStopPips?.toFixed(1) ?? "—"} pips</strong></div>
-        <div><small>POS #1 TP · {setup?.rr1?.toFixed(1) ?? "—"}R</small><strong>{px(setup?.tp1)}</strong></div>
-        <div><small>POS #2 TP · {setup?.rr2?.toFixed(1) ?? "—"}R</small><strong>{px(setup?.tp2)}</strong></div>
-      </div>
-      {setup && <div className="zone-map-line">
-        <strong>MAPPED ZONE</strong><span>{setup.zoneSource}</span>
-        <small>FIB 50 {px(setup.fib.fib50)} · 61.8 {px(setup.fib.fib618)} · 70.5 {px(setup.fib.fib705)}</small>
-      </div>}
-      <div className="be-note"><strong>BE rule</strong><span>{setup?.beRule ?? "—"}</span></div>
+      <div className="research-note">Win rate is historical evidence from comparable executable mapped setups, not the zone score and not a guarantee.</div>
     </article>
   );
 }
@@ -103,8 +112,6 @@ function PredictionCard({ row }: { row: HorizonPrediction }) {
       <div><strong>{row.minutes} MIN</strong><span className={`pill ${row.bias.toLowerCase()}`}>{row.bias}</span></div>
       <b>{row.edgeScore}/100 edge</b>
       <strong className="prediction-action">{row.action}</strong>
-      <small><b>Exact entry {px(row.exactEntry)}</b> · zone {px(row.entryZoneLow)} – {px(row.entryZoneHigh)}</small>
-      <small>SL {px(row.stop)} · TP1 {px(row.tp1)} · TP2 {px(row.tp2)} · R:R 1:{row.rr.toFixed(1)}</small>
       <small>Projected {px(row.projectedLow)} – {px(row.projectedHigh)} · {row.alignment}</small>
     </div>
   );
@@ -115,15 +122,13 @@ export default function Dashboard() {
   const [draftKey, setDraftKey] = useState("");
   const [frames, setFrames] = useState<MarketFrames | null>(null);
   const framesRef = useRef<MarketFrames | null>(null);
-  const [scalp, setScalp] = useState<TradeSetup | null>(null);
-  const scalpRef = useRef<TradeSetup | null>(null);
+  const [zone, setZone] = useState<AdaptiveZone | null>(null);
+  const zoneRef = useRef<AdaptiveZone | null>(null);
   const [daily, setDaily] = useState<TradeSetup | null>(null);
   const [predictions, setPredictions] = useState<HorizonPrediction[]>([]);
+  const [performanceStats, setPerformanceStats] = useState<BacktestStats | null>(null);
+  const [archiveRows, setArchiveRows] = useState<ZoneArchive[]>([]);
   const [account, setAccount] = useState<AccountConfig>(DEFAULT_ACCOUNT);
-  const [backtest, setBacktest] = useState<BacktestStats | null>(null);
-  const [dailyBacktest, setDailyBacktest] = useState<BacktestStats | null>(null);
-  const [setupStats, setSetupStats] = useState<BacktestStats | null>(null);
-  const [history, setHistory] = useState<FrozenRow[]>([]);
   const [streamState, setStreamState] = useState<StreamState>("CLOSED");
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
@@ -131,58 +136,58 @@ export default function Dashboard() {
   const [tickCount, setTickCount] = useState(0);
   const [lastTickAt, setLastTickAt] = useState<number | null>(null);
   const [clock, setClock] = useState(Date.now());
-  const [pipelineLatencyMs, setPipelineLatencyMs] = useState<number | null>(null);
-  const [analysisLatencyMs, setAnalysisLatencyMs] = useState<number | null>(null);
-  const [sourceTimestampGapMs, setSourceTimestampGapMs] = useState<number | null>(null);
-  const [tickGapMs, setTickGapMs] = useState<number | null>(null);
+  const [showAnalysis, setShowAnalysis] = useState(false);
+  const [hotPathMs, setHotPathMs] = useState<number | null>(null);
+  const [uiPaintMs, setUiPaintMs] = useState<number | null>(null);
+  const [localTotalMs, setLocalTotalMs] = useState<number | null>(null);
+  const [deepMapMs, setDeepMapMs] = useState<number | null>(null);
+  const [providerGapMs, setProviderGapMs] = useState<number | null>(null);
+  const [feedAgeMs, setFeedAgeMs] = useState<number | null>(null);
   const lastTickWallRef = useRef<number | null>(null);
-  const lastDailyCalcRef = useRef(0);
+  const lastRemapRef = useRef(0);
 
   useEffect(() => {
     const key = getSavedApiKey();
     setApiKey(key); setDraftKey(key);
-    setAccount(loadAccount()); setHistory(loadHistory());
-    const timer = window.setInterval(() => setClock(Date.now()), 250);
+    setAccount(loadAccount()); setArchiveRows(loadArchive());
+    const timer = window.setInterval(() => setClock(Date.now()), 200);
     return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
-    try { localStorage.setItem("xau_v7_account", JSON.stringify(account)); } catch {}
+    try { localStorage.setItem("xau_v8_account", JSON.stringify(account)); } catch {}
     const f = framesRef.current;
-    if (f) recalcAll(f, true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (!f) return;
+    try {
+      const candidate = buildAdaptiveCandidate(f, account, Date.now());
+      const price = f.c1.at(-1)?.close ?? candidate.exactEntry;
+      const evaluated = evaluateAdaptiveZone(null, candidate, price, Date.now(), account);
+      zoneRef.current = evaluated.zone; setZone(evaluated.zone); setPredictions(buildV8Predictions(f, evaluated.zone));
+      setDaily(buildDailySetup(f, account, Date.now()));
+      setPerformanceStats(computeComparablePerformance(f, account));
+    } catch {}
   }, [account]);
 
-  function recalcResearch(next: MarketFrames) {
-    try {
-      const bt = backtestTightScalp(next, account, 140);
-      setBacktest(bt);
-      const recent = bt.trades.slice(-40);
-      const wins = recent.filter((t) => t.result === "WIN").length;
-      const losses = recent.filter((t) => t.result === "LOSS").length;
-      const sampleSize = wins + losses;
-      setSetupStats({
-        winRate: sampleSize ? Math.round(wins / sampleSize * 1000) / 10 : null,
-        wins, losses, sampleSize,
-        profitFactor: losses ? Math.round((wins * 1.8 / losses) * 100) / 100 : wins ? 99 : null,
-        averageRiskReward: recent.length ? Math.round(recent.reduce((s, t) => s + t.riskReward, 0) / recent.length * 100) / 100 : null,
-        trades: recent,
-      });
-    } catch {}
-    try { setDailyBacktest(backtestDailyMapped(next, account, 80)); } catch {}
+  function pushArchive(row: ZoneArchive | null) {
+    if (!row) return;
+    setArchiveRows((old) => {
+      if (old.some((x) => x.id === row.id && x.closedAt === row.closedAt)) return old;
+      const next = [row, ...old].slice(0, 120);
+      saveArchive(next);
+      return next;
+    });
   }
 
-  function recalcAll(next: MarketFrames, includeDaily = false, nowMs = Date.now()) {
-    try {
-      const s = buildScalpingSetup(next, account, nowMs);
-      scalpRef.current = s; setScalp(s);
-      setPredictions(buildPredictions(next, s));
-    } catch {}
-    // Keep DAILY calculation out of the hot tick path. It only runs on initialization/manual sync/minute roll.
-    if (includeDaily) {
-      lastDailyCalcRef.current = nowMs;
-      try { setDaily(buildDailySetup(next, account, nowMs)); } catch {}
-    }
+  function initializeFromFrames(next: MarketFrames) {
+    const now = Date.now();
+    const candidate = buildAdaptiveCandidate(next, account, now);
+    const price = next.c1.at(-1)?.close ?? candidate.exactEntry;
+    const evaluated = evaluateAdaptiveZone(null, candidate, price, now, account);
+    zoneRef.current = evaluated.zone;
+    setZone(evaluated.zone);
+    setPredictions(buildV8Predictions(next, evaluated.zone));
+    setDaily(buildDailySetup(next, account, now));
+    try { setPerformanceStats(computeComparablePerformance(next, account)); } catch {}
   }
 
   async function loadMarket(key: string) {
@@ -190,9 +195,7 @@ export default function Dashboard() {
     try {
       const cached = getCachedFrames();
       const next = cached ? await refreshFromOneMinute(key, cached) : await fetchAllTimeframes(key);
-      framesRef.current = next; setFrames(next);
-      recalcAll(next, true); recalcResearch(next);
-      setReady(true);
+      framesRef.current = next; setFrames(next); initializeFromFrames(next); setReady(true);
     } catch (e) { setError(e instanceof Error ? e.message : "Market data initialization error"); }
     finally { setLoading(false); }
   }
@@ -202,14 +205,14 @@ export default function Dashboard() {
     setLoading(true);
     try {
       const next = await refreshFromOneMinute(apiKey, framesRef.current);
-      framesRef.current = next; setFrames(next); recalcAll(next, true); recalcResearch(next); setError(null);
+      framesRef.current = next; setFrames(next); initializeFromFrames(next); cacheMarketFrames(next); setError(null);
     } catch (e) { setError(e instanceof Error ? e.message : "Historical sync failed"); }
     finally { setLoading(false); }
   }
 
   useEffect(() => {
     if (!apiKey) return;
-    setFrames(null); framesRef.current = null; setReady(false); setTickCount(0);
+    framesRef.current = null; zoneRef.current = null; setFrames(null); setZone(null); setReady(false); setTickCount(0);
     void loadMarket(apiKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey]);
@@ -222,146 +225,129 @@ export default function Dashboard() {
       onTick: (tick) => {
         const current = framesRef.current;
         if (!current) return;
+        const hotStart = performance.now();
         const prevMinute = current.c1.at(-1)?.timestamp;
         const next = applyRealtimeTick(current, tick);
         const nextMinute = next.c1.at(-1)?.timestamp;
         const minuteRolled = Boolean(prevMinute && nextMinute && prevMinute !== nextMinute);
         framesRef.current = next;
 
-        // V7 two-speed engine:
-        // 1) O(1) execution path immediately updates chart + ENTER/WAIT state from the already-validated zone.
-        // 2) Deep Fibonacci/liquidity/indicator remap runs right after, outside the measured hot path.
-        const priorSetup = scalpRef.current;
-        if (priorSetup) {
-          const fastSetup = fastUpdateSetupForPrice(priorSetup, tick.price, account);
-          scalpRef.current = fastSetup;
-          setScalp(fastSetup);
+        const active = zoneRef.current;
+        if (active) {
+          const hotZone = updateZoneHot(active, tick.price, tick.receivedAtMs, account.pipSize);
+          zoneRef.current = hotZone; setZone(hotZone);
         }
         setFrames(next);
         setLastTickAt(tick.receivedAtMs);
         setTickCount((n) => n + 1);
         setError(null);
-
-        const hotElapsed = performance.now() - tick.receivedPerfMs;
-        setPipelineLatencyMs(Math.round(hotElapsed * 10) / 10);
-        if (tick.sourceTimestampMs != null) setSourceTimestampGapMs(Math.max(0, tick.receivedAtMs - tick.sourceTimestampMs));
-        if (lastTickWallRef.current != null) setTickGapMs(Math.max(0, tick.receivedAtMs - lastTickWallRef.current));
+        if (lastTickWallRef.current != null) setProviderGapMs(Math.max(0, tick.receivedAtMs - lastTickWallRef.current));
         lastTickWallRef.current = tick.receivedAtMs;
+        if (tick.sourceTimestampMs != null) setFeedAgeMs(Math.max(0, tick.receivedAtMs - tick.sourceTimestampMs));
+        const hot = performance.now() - hotStart;
+        setHotPathMs(Math.round(hot * 10) / 10);
 
-        window.setTimeout(() => {
-          const deep0 = performance.now();
-          try {
-            const s = buildScalpingSetup(next, account, tick.receivedAtMs);
-            scalpRef.current = s;
-            setScalp(s);
-            setPredictions(buildPredictions(next, s));
-          } catch {}
-          setAnalysisLatencyMs(Math.round((performance.now() - deep0) * 10) / 10);
-        }, 0);
+        requestAnimationFrame(() => {
+          const total = performance.now() - tick.receivedPerfMs;
+          setLocalTotalMs(Math.round(total * 10) / 10);
+          setUiPaintMs(Math.round(Math.max(0, total - hot) * 10) / 10);
+        });
+
+        if (tick.receivedAtMs - lastRemapRef.current >= MIN_REMAP_INTERVAL_MS) {
+          lastRemapRef.current = tick.receivedAtMs;
+          window.setTimeout(() => {
+            const deep0 = performance.now();
+            try {
+              const candidate = buildAdaptiveCandidate(next, account, tick.receivedAtMs);
+              const evaluated = evaluateAdaptiveZone(zoneRef.current, candidate, tick.price, tick.receivedAtMs, account);
+              zoneRef.current = evaluated.zone; setZone(evaluated.zone); pushArchive(evaluated.archived);
+              setPredictions(buildV8Predictions(next, evaluated.zone));
+            } catch {}
+            setDeepMapMs(Math.round((performance.now() - deep0) * 10) / 10);
+          }, 0);
+        }
 
         if (minuteRolled) {
-          const frozen = scalpRef.current;
-          if (frozen) {
-            const row: FrozenRow = {
-              id: `${nextMinute}-${frozen.side}`,
-              at: nextMinute!, side: frozen.side, action: frozen.status,
-              entry: frozen.exactEntry, stop: frozen.stop, tp1: frozen.tp1, tp2: frozen.tp2,
-              riskPct: frozen.risk.riskPct, confidence: frozen.confidence,
-            };
-            setHistory((old) => {
-              if (old.some((x) => x.id === row.id)) return old;
-              const rows = [row, ...old].slice(0, 120);
-              try { localStorage.setItem("xau_v7_history", JSON.stringify(rows)); } catch {}
-              return rows;
-            });
-          }
-          // Defer non-scalp work so the just-received price event is never held up by daily/backtest/cache work.
           window.setTimeout(() => {
             try { setDaily(buildDailySetup(next, account, tick.receivedAtMs)); } catch {}
+            try { setPerformanceStats(computeComparablePerformance(next, account)); } catch {}
             cacheMarketFrames(next);
           }, 0);
-          const runResearch = () => recalcResearch(next);
-          const idle = (window as Window & { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
-          if (typeof idle === "function") idle(runResearch);
-          else window.setTimeout(runResearch, 250);
         }
       },
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey, ready, account]);
 
-  const currentPrice = frames?.c1.at(-1)?.close ?? scalp?.exactEntry ?? null;
-  const tickAge = lastTickAt ? Math.max(0, (clock - lastTickAt) / 1000) : null;
+  const currentPrice = frames?.c1.at(-1)?.close ?? zone?.exactEntry ?? null;
+  const tickAgeMs = lastTickAt ? Math.max(0, clock - lastTickAt) : null;
+  const stale = tickAgeMs != null && tickAgeMs > DATA_STALE_THRESHOLD_MS;
+  const streamLive = streamState === "LIVE" && tickAgeMs != null;
+  const action = currentAction(zone, stale, streamLive);
+  const localTargetOk = localTotalMs != null && localTotalMs <= 100;
+  const providerTargetOk = providerGapMs != null && providerGapMs <= 100;
   const isSaturday = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Jakarta", weekday: "short" }).format(new Date(clock)) === "Sat";
-  const stale = tickAge != null && tickAge > 3;
-  const formatWib = (ms: number) => new Intl.DateTimeFormat("id-ID", { timeZone: "Asia/Jakarta", hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3, hour12: false }).format(new Date(ms)) + " WIB";
-  const sampleQuality = (setupStats?.sampleSize ?? 0) >= 40 ? "GOOD SAMPLE" : (setupStats?.sampleSize ?? 0) >= 15 ? "EARLY SAMPLE" : "LOW SAMPLE";
-  const pipRiskTotalIdr = account.pipSize * account.contractSizeOz * account.lotPerPosition * account.positions * account.usdIdr;
+  const totalRiskPerPip = account.pipSize * account.contractSizeOz * account.lotPerPosition * account.positions * account.usdIdr;
 
   function connectKey() {
     const key = draftKey.trim(); if (!key) return;
     saveApiKey(key); setApiKey(key);
   }
   function disconnectKey() {
-    clearApiKey(); setApiKey(""); setDraftKey(""); setReady(false); setFrames(null); framesRef.current = null; setScalp(null); setDaily(null); setPredictions([]);
+    clearApiKey(); setApiKey(""); setDraftKey(""); setReady(false); framesRef.current = null; zoneRef.current = null; setFrames(null); setZone(null); setPredictions([]);
   }
   function updateAccount<K extends keyof AccountConfig>(key: K, value: number) {
     setAccount((a) => ({ ...a, [key]: Number.isFinite(value) ? value : a[key] }));
   }
 
   return (
-    <main className="shell">
+    <main className="shell v8-shell">
       <header className="topbar">
-        <div><div className="eyebrow">RASYID SIGNAL CALL · XAUUSD V7 MAPPED ENTRY</div><h1>XAU/USD</h1><div className="subline">Fibonacci + liquidity + predictive zones · exact entry/SL · account-capped daily & scalp</div></div>
-        <div className={`status ${streamState === "LIVE" && !stale ? "online" : "offline"}`}><span />{apiKey ? `WS ${streamState}${stale ? " · NO NEW TICK" : ""}` : "API KEY REQUIRED"}</div>
+        <div><div className="eyebrow">RASYID SIGNAL CALL · XAUUSD V8 ADAPTIVE ZONE</div><h1>XAU/USD</h1><div className="subline">Always-remapped scalp opportunity · one clean zone · realtime action separated from predictive mapping</div></div>
+        <div className={`status ${streamState === "LIVE" && !stale ? "online" : "offline"}`}><span />{apiKey ? `WS ${streamState}${stale ? " · STALE" : ""}` : "API KEY REQUIRED"}</div>
       </header>
 
-      {isSaturday && <div className="weekend-banner"><strong>SATURDAY MODE</strong><span>V7 tidak otomatis memblokir entry hari Sabtu. Eksekusi cuma dianggap live kalau WebSocket benar-benar mengirim tick; cek juga apakah broker lo memang membuka XAU/USD weekend.</span></div>}
+      {isSaturday && <div className="weekend-banner"><strong>SATURDAY FEED MODE</strong><span>V8 trades only if fresh live XAU/USD ticks are actually arriving. If the connected feed is frozen, realtime action is disabled instead of inventing a weekend call.</span></div>}
 
-      {!apiKey && <section className="panel connect-panel"><div className="panel-head"><span>CONNECT MARKET DATA</span><span>Twelve Data</span></div><p>API key disimpan lokal di browser untuk dashboard personal.</p><div className="connect-row"><input type="password" value={draftKey} onChange={(e) => setDraftKey(e.target.value)} placeholder="Paste Twelve Data API key"/><button onClick={connectKey}>CONNECT</button></div></section>}
+      {!apiKey && <section className="panel connect-panel"><div className="panel-head"><span>CONNECT MARKET DATA</span><span>Twelve Data</span></div><p>API key stays in your browser for this personal GitHub Pages dashboard.</p><div className="connect-row"><input type="password" value={draftKey} onChange={(e) => setDraftKey(e.target.value)} placeholder="Paste Twelve Data API key"/><button onClick={connectKey}>CONNECT</button></div></section>}
 
-      {apiKey && <div className="toolbar"><span>{lastTickAt ? `Last tick ${formatWib(lastTickAt)} · ${tickAge?.toFixed(2)}s ago` : loading ? "Loading history..." : "Waiting tick..."}</span><span className="usage-note">HOT PATH {pipelineLatencyMs == null ? "—" : `${pipelineLatencyMs.toFixed(1)}ms${pipelineLatencyMs <= 10 ? " ✓" : " >10ms"}`} · deep map {analysisLatencyMs == null ? "—" : `${analysisLatencyMs.toFixed(1)}ms`} · event gap {tickGapMs == null ? "—" : `${tickGapMs}ms`} · provider timestamp gap {sourceTimestampGapMs == null ? "—" : `${sourceTimestampGapMs}ms`} · ticks {tickCount}</span><div><button onClick={() => void syncHistory()} disabled={loading}>{loading ? "SYNCING..." : "SYNC HISTORY"}</button><button onClick={disconnectKey}>CHANGE API KEY</button></div></div>}
+      {apiKey && <div className="toolbar v8-toolbar"><span>{lastTickAt ? `Last tick ${formatWib(lastTickAt)} · ${((tickAgeMs ?? 0) / 1000).toFixed(2)}s ago` : loading ? "Loading history..." : "Waiting tick..."}</span><span className="usage-note">LOCAL {localTotalMs == null ? "—" : `${localTotalMs.toFixed(1)}ms ${localTargetOk ? "✓" : ">100ms"}`} · hot {hotPathMs == null ? "—" : `${hotPathMs.toFixed(1)}ms`} · UI {uiPaintMs == null ? "—" : `${uiPaintMs.toFixed(1)}ms`} · deep map {deepMapMs == null ? "—" : `${deepMapMs.toFixed(1)}ms`} · provider tick interval {providerGapMs == null ? "—" : `${providerGapMs}ms ${providerTargetOk ? "✓" : "upstream"}`} · feed age {feedAgeMs == null ? "—" : `${feedAgeMs}ms`} · ticks {tickCount}</span><div><button onClick={() => setShowAnalysis((v) => !v)}>{showAnalysis ? "HIDE ANALYSIS" : "SHOW ANALYSIS"}</button><button onClick={() => void syncHistory()} disabled={loading}>{loading ? "SYNCING..." : "SYNC HISTORY"}</button><button onClick={disconnectKey}>CHANGE API KEY</button></div></div>}
       {error && <div className="error">{error}</div>}
 
-      <section className="hero-grid v5-hero">
-        <article className="panel market-panel"><div className="panel-head"><span>Gold Spot / U.S. Dollar</span><span>● LIVE TICK · 1M · WIB</span></div><div className="market-price">{px(currentPrice)} <small className={`live-tag ${streamState === "LIVE" && !stale ? "on" : ""}`}>{streamState === "LIVE" && !stale ? "STREAMING" : stale ? "WAITING PROVIDER EVENT" : streamState}</small></div><CandleChart candles={frames?.c1 ?? []} scalp={scalp} daily={daily}/></article>
-        <div className="side-stack"><SetupCard title="SCALP MAPPED SETUP · 1M + 5M" setup={scalp}/><SetupCard title="DAILY PREDICTIVE SETUP · 15M + 1H" setup={daily}/></div>
+      <section className="v8-decision-grid">
+        <ActionPanel zone={zone} action={action} currentPrice={currentPrice} stale={stale} />
+        <ZonePanel zone={zone} />
+        <PerformancePanel zone={zone} stats={performanceStats} />
       </section>
 
-      <section className="panel account-panel">
-        <div className="panel-head"><span>ACCOUNT + PIP / RISK ENGINE</span><span>DEFAULT: Rp1.000.000 · 2 × 0.01 LOT</span></div>
+      <section className="panel market-panel v8-market-panel">
+        <div className="panel-head"><span>LIVE 1M CHART · WIB</span><span>ONE ACTIVE ZONE ONLY</span></div>
+        <div className="market-price">{px(currentPrice)} <small className={`live-tag ${streamState === "LIVE" && !stale ? "on" : ""}`}>{streamState === "LIVE" && !stale ? "STREAMING" : stale ? "STALE" : streamState}</small></div>
+        <CandleChart candles={frames?.c1 ?? []} zone={zone} showAnalysis={showAnalysis}/>
+      </section>
+
+      <section className="panel prediction-panel v8-prediction-panel">
+        <div className="panel-head"><span>PREDICTIVE BIAS · 1 / 5 / 10 MIN</span><span>SCENARIO, NOT GUARANTEE</span></div>
+        <div className="prediction-grid">{predictions.length ? predictions.map((p) => <PredictionCard key={p.minutes} row={p}/>) : <div className="empty">Waiting for market data...</div>}</div>
+      </section>
+
+      <section className="lower-grid v8-secondary-grid">
+        <article className="panel"><div className="panel-head"><span>DAILY CONTEXT</span><span>NOT DRAWN ON CHART</span></div><div className="v8-daily-compact"><b>{daily?.side ?? "—"}</b><span>Entry {px(daily?.exactEntry)} · SL {px(daily?.stop)} · TP1 {px(daily?.tp1)} · TP2 {px(daily?.tp2)}</span><small>{daily?.status ?? "Waiting for data"}</small></div></article>
+        <article className="panel"><div className="panel-head"><span>RISK ENGINE</span><span>1 PIP = $0.10 XAU MOVE</span></div><div className="v8-risk-compact"><span>Balance <b>{money.format(account.balanceIdr)}</b></span><span>{account.positions} × {account.lotPerPosition.toFixed(3)} lot</span><span>Max scalp SL <b>{account.maxScalpStopPips} pips</b></span><span>Risk per total pip ≈ <b>{money.format(totalRiskPerPip)}</b></span></div></article>
+      </section>
+
+      <section className="panel account-panel v8-account-panel">
+        <div className="panel-head"><span>ACCOUNT SETTINGS</span><span>ZONE FITS THE ACCOUNT</span></div>
         <div className="account-grid">
           <label>Balance IDR<input type="number" value={account.balanceIdr} onChange={(e) => updateAccount("balanceIdr", Number(e.target.value))}/></label>
           <label>Positions<input type="number" min="1" step="1" value={account.positions} onChange={(e) => updateAccount("positions", Number(e.target.value))}/></label>
           <label>Lot / position<input type="number" step="0.001" value={account.lotPerPosition} onChange={(e) => updateAccount("lotPerPosition", Number(e.target.value))}/></label>
-          <label>Contract oz / 1 lot<input type="number" value={account.contractSizeOz} onChange={(e) => updateAccount("contractSizeOz", Number(e.target.value))}/></label>
-          <label>USD/IDR estimate<input type="number" value={account.usdIdr} onChange={(e) => updateAccount("usdIdr", Number(e.target.value))}/></label>
-          <label>Pip size ($ price)<input type="number" step="0.01" value={account.pipSize} onChange={(e) => updateAccount("pipSize", Number(e.target.value))}/></label>
-          <label>Max scalp SL (pips)<input type="number" step="1" value={account.maxScalpStopPips} onChange={(e) => updateAccount("maxScalpStopPips", Number(e.target.value))}/></label>
-          <label>Max daily SL (pips)<input type="number" step="1" value={account.maxDailyStopPips} onChange={(e) => updateAccount("maxDailyStopPips", Number(e.target.value))}/></label>
+          <label>USD/IDR<input type="number" value={account.usdIdr} onChange={(e) => updateAccount("usdIdr", Number(e.target.value))}/></label>
+          <label>Max scalp SL pips<input type="number" step="1" value={account.maxScalpStopPips} onChange={(e) => updateAccount("maxScalpStopPips", Number(e.target.value))}/></label>
           <label>Scalp target risk %<input type="number" step="0.1" value={account.scalpTargetRiskPct} onChange={(e) => updateAccount("scalpTargetRiskPct", Number(e.target.value))}/></label>
-          <label>Daily target risk %<input type="number" step="0.1" value={account.dailyTargetRiskPct} onChange={(e) => updateAccount("dailyTargetRiskPct", Number(e.target.value))}/></label>
         </div>
-        <div className="risk-warning">Pip convention lo sekarang dikunci default <b>1 pip = $0.10 movement</b>, jadi <b>25 pips = $2.50 movement</b>. Dengan 2 × 0.01 lot dan contract 100 oz, 1 pip total ≈ {money.format(pipRiskTotalIdr)} dan 25 pips ≈ {money.format(pipRiskTotalIdr * 25)} total risk pada USD/IDR sekarang. Setup V7 menyesuaikan entry zone ke risk budget; daily nggak boleh lagi bikin risk &gt;100%.</div>
       </section>
 
-      <section className="panel prediction-panel">
-        <div className="panel-head"><span>PREDICTIVE CALL · 1 / 5 / 10 MIN</span><span>EXACT ENTRY + ZONE + SL/TP · NO EXTRA WAIT INSIDE ZONE</span></div>
-        <div className="prediction-grid">{predictions.length ? predictions.map((p) => <PredictionCard key={p.minutes} row={p}/>) : <div className="empty">Waiting for market data...</div>}</div>
-      </section>
-
-      <section className="stats-grid v7-stats">
-        <article className="panel metric-card"><div className="panel-head"><span>RECENT 40 V7 SCALPS</span><span>MAPPED ZONE ONLY</span></div><div className="metric-main">{pct(setupStats?.winRate)}</div><div className="metric-caption">Recent executable mapped-zone sample · TP1 1.8R before SL · N={setupStats?.sampleSize ?? 0} · {sampleQuality}</div><div className="mini-metrics"><span>WINS <strong>{setupStats?.wins ?? 0}</strong></span><span>LOSSES <strong>{setupStats?.losses ?? 0}</strong></span><span>PF <strong>{setupStats?.profitFactor ?? "—"}</strong></span></div></article>
-        <article className="panel metric-card"><div className="panel-head"><span>FULL V7 SCALP BACKTEST</span><span>FIB + LIQUIDITY MAP</span></div><div className="metric-main">{pct(backtest?.winRate)}</div><div className="metric-caption">Closed-bar backtest · N={backtest?.sampleSize ?? 0}</div><div className="mini-metrics"><span>WINS <strong>{backtest?.wins ?? 0}</strong></span><span>LOSSES <strong>{backtest?.losses ?? 0}</strong></span><span>AVG RR <strong>{backtest?.averageRiskReward ?? "—"}</strong></span></div></article>
-        <article className="panel metric-card"><div className="panel-head"><span>V7 DAILY ZONE BACKTEST</span><span>ACCOUNT-CAPPED</span></div><div className="metric-main">{pct(dailyBacktest?.winRate)}</div><div className="metric-caption">Daily predictive-zone sample · TP1 2.0R before SL · N={dailyBacktest?.sampleSize ?? 0}</div><div className="mini-metrics"><span>WINS <strong>{dailyBacktest?.wins ?? 0}</strong></span><span>LOSSES <strong>{dailyBacktest?.losses ?? 0}</strong></span><span>AVG RR <strong>{dailyBacktest?.averageRiskReward ?? "—"}</strong></span></div></article>
-      </section>
-
-      <section className="lower-grid">
-        <article className="panel"><div className="panel-head"><span>TOP-DOWN MARKET MAP</span><span>4H → 1M</span></div><div className="timeframes">{scalp?.timeframeAnalysis.map((row) => <div className="tf-row" key={row.timeframe}><strong>{row.timeframe.toUpperCase()}</strong><span className={`pill ${row.bias.toLowerCase()}`}>{row.bias}</span><span>{row.score}/100</span><small>Net {row.directionalScore > 0 ? "+" : ""}{row.directionalScore} · RSI {row.rsi} · ADX {row.adx}</small></div>)}</div></article>
-        <article className="panel"><div className="panel-head"><span>WHY THIS ZONE?</span><span>V7</span></div><ul className="reasons">{(scalp?.reasons ?? ["Waiting for data..."]).map((r) => <li key={r}>{r}</li>)}</ul><div className="research-note">Zona entry dipetakan dari Fibonacci retracement, EMA value, micro structure, liquidity/sweep, momentum dan ruang R:R. Begitu harga masuk box entry zone, status langsung tegas ENTER BUY/SELL NOW.</div></article>
-      </section>
-
-      <section className="panel history"><div className="panel-head"><span>FROZEN 1M DECISIONS</span><span>browser-local</span></div>{!history.length ? <div className="empty">Belum ada minute snapshot.</div> : <div className="table-wrap"><table><thead><tr><th>Time</th><th>Side</th><th>Action</th><th>Conf</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Risk%</th></tr></thead><tbody>{history.map((r) => <tr key={r.id}><td>{new Intl.DateTimeFormat("id-ID", { timeZone: "Asia/Jakarta", dateStyle: "short", timeStyle: "medium" }).format(new Date(r.at)) + " WIB"}</td><td><span className={`pill ${r.side.toLowerCase()}`}>{r.side}</span></td><td>{r.action}</td><td>{r.confidence}</td><td>{px(r.entry)}</td><td>{px(r.stop)}</td><td>{px(r.tp1)}</td><td>{px(r.tp2)}</td><td>{r.riskPct.toFixed(1)}%</td></tr>)}</tbody></table></div>}</section>
+      <section className="panel history v8-history"><div className="panel-head"><span>ZONE LIFECYCLE ARCHIVE</span><span>old setups never rewritten</span></div>{!archiveRows.length ? <div className="empty">No replaced/missed zones yet.</div> : <div className="table-wrap"><table><thead><tr><th>Closed</th><th>Side</th><th>Setup</th><th>State</th><th>Entry</th><th>SL</th><th>TP1</th><th>Score</th><th>Reason</th></tr></thead><tbody>{archiveRows.slice(0, 40).map((r) => <tr key={`${r.id}-${r.closedAt}`}><td>{formatWib(r.closedAt)}</td><td><span className={`pill ${r.side.toLowerCase()}`}>{r.side}</span></td><td>{r.setupType}</td><td>{r.state}</td><td>{px(r.exactEntry)}</td><td>{px(r.stop)}</td><td>{px(r.tp1)}</td><td>{r.score}</td><td>{r.reason}</td></tr>)}</tbody></table></div>}</section>
     </main>
   );
 }

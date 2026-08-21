@@ -160,3 +160,58 @@ th { color: var(--muted); font-size: 11px; letter-spacing: .06em; }
 .zone-map-line span, .zone-map-line small { color: var(--muted); font-size: 10px; line-height: 1.4; }
 .v7-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 @media (max-width: 1100px) { .v7-stats { grid-template-columns: 1fr; } }
+
+/* V8 adaptive realtime zone engine */
+.v8-shell { width: min(1460px, 96vw); }
+.v8-decision-grid { display:grid; grid-template-columns:1.25fr 1fr .9fr; gap:16px; margin-bottom:16px; }
+.v8-action-card, .v8-zone-card, .v8-performance-card { min-height:250px; }
+.v8-action-card { position:relative; }
+.v8-action-card::before { content:""; position:absolute; inset:0 auto 0 0; width:4px; background:#66738a; }
+.v8-action-card.buy::before { background:var(--buy); }
+.v8-action-card.sell::before { background:var(--sell); }
+.v8-action-card.live-action { border-color:rgba(25,195,125,.45); }
+.v8-action-title { padding:24px 22px 8px; font-size:clamp(25px,3vw,39px); font-weight:900; letter-spacing:-.04em; }
+.v8-action-card.buy .v8-action-title { color:var(--buy); }
+.v8-action-card.sell .v8-action-title { color:var(--sell); }
+.v8-current { padding:0 22px 14px; color:var(--muted); font-size:11px; letter-spacing:.08em; font-weight:800; }
+.v8-current strong { color:var(--text); margin-left:8px; font-size:18px; letter-spacing:0; }
+.v8-levels { border-bottom:0; }
+.v8-action-note { margin:0 20px 18px; padding:10px 12px; border:1px solid var(--line); border-radius:10px; color:var(--muted); font-size:11px; line-height:1.45; }
+.v8-zone-card { position:relative; }
+.v8-zone-card::before { content:""; position:absolute; inset:0 auto 0 0; width:3px; background:#66738a; }
+.v8-zone-card.buy::before { background:var(--buy); }
+.v8-zone-card.sell::before { background:var(--sell); }
+.v8-zone-side { padding:22px 22px 4px; color:var(--muted); font-size:11px; font-weight:900; letter-spacing:.08em; }
+.v8-zone-card.buy .v8-zone-side { color:var(--buy); }
+.v8-zone-card.sell .v8-zone-side { color:var(--sell); }
+.v8-zone-range { padding:2px 22px 16px; font-size:31px; font-weight:900; letter-spacing:-.04em; }
+.v8-zone-meta { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:10px 22px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }
+.v8-zone-meta b { display:block; color:var(--text); margin-top:3px; }
+.v8-performance-card .mini-metrics { grid-template-columns:1.25fr .75fr .65fr; }
+.v8-perf-main { padding:22px 22px 0; font-size:48px; font-weight:900; letter-spacing:-.04em; }
+.v8-market-panel { margin-bottom:16px; }
+.v8-chart-shell .entry-zone-box { right:78px; opacity:.62; }
+.v8-chart-shell .entry-zone-box[data-action="live"] { opacity:.92; }
+.v8-toolbar { grid-template-columns:auto 1fr auto; }
+.v8-toolbar .usage-note { font-size:10px; line-height:1.45; }
+.v8-prediction-panel { margin-top:0; }
+.v8-secondary-grid { margin-top:16px; }
+.v8-daily-compact, .v8-risk-compact { padding:20px 22px; display:grid; gap:9px; }
+.v8-daily-compact b { font-size:28px; }
+.v8-daily-compact span, .v8-daily-compact small, .v8-risk-compact span { color:var(--muted); }
+.v8-risk-compact { grid-template-columns:1fr 1fr; }
+.v8-risk-compact b { color:var(--text); }
+.v8-account-panel { margin-top:16px; }
+.v8-account-panel .account-grid { grid-template-columns:repeat(6,minmax(120px,1fr)); }
+.v8-history { margin-top:16px; }
+@media (max-width:1180px) {
+  .v8-decision-grid { grid-template-columns:1fr 1fr; }
+  .v8-performance-card { grid-column:1/-1; min-height:auto; }
+  .v8-account-panel .account-grid { grid-template-columns:repeat(3,1fr); }
+}
+@media (max-width:760px) {
+  .v8-decision-grid { grid-template-columns:1fr; }
+  .v8-performance-card { grid-column:auto; }
+  .v8-zone-meta, .v8-risk-compact { grid-template-columns:1fr; }
+  .v8-account-panel .account-grid { grid-template-columns:1fr; }
+}

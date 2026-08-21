@@ -3,8 +3,8 @@ import type { Candle } from "../types";
 const BASE = "https://api.twelvedata.com/time_series";
 const WS_BASE = "wss://ws.twelvedata.com/v1/quotes/price";
 const KEY_NAME = "twelve_data_api_key";
-const FRAME_CACHE = "xau_scalp_frames_v7";
-const FRAME_CACHE_AT = "xau_scalp_frames_v7_at";
+const FRAME_CACHE = "xau_scalp_frames_v8";
+const FRAME_CACHE_AT = "xau_scalp_frames_v8_at";
 const CACHE_MAX_AGE_MS = 4 * 60 * 60_000;
 
 export type MarketFrames = {
@@ -336,7 +336,7 @@ export function connectRealtimeXauUsd(
             : null;
           if (Number.isFinite(price) && price > 0) {
             handlers.onState?.("LIVE");
-            // V7: bucket the live candle by browser receive time. This avoids a visibly stale chart
+            // V8: bucket the live candle by browser receive time. This avoids a visibly stale chart
             // when the upstream event timestamp is coarse or delayed. Source timestamp is kept only
             // for diagnostics; it is not mislabeled as application latency.
             handlers.onTick({
